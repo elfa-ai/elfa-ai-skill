@@ -51,7 +51,6 @@ echo '---' >> .cursor/rules/elfa-api.mdc
 cat SKILL.md >> .cursor/rules/elfa-api.mdc
 ```
 
-
 ### GitHub Copilot
 
 Copy the skill contents into your repo's Copilot instructions:
@@ -121,6 +120,7 @@ Help me integrate the Elfa trending tokens endpoint in TypeScript
 └── scripts/
     ├── elfa_call.sh          # Helper script for live API calls
     └── build-skill.sh        # Build .skill package for Claude Desktop
+```
 
 - **`SKILL.md`** — The skill itself. Contains YAML frontmatter (name, description, env vars, credentials) and step-by-step instructions for the agent. Follows the [Agent Skills](https://agentskills.io) open standard.
 - **`references/`** — Contains the OpenAPI 3.0 spec (`swagger.json`) for machine-readable endpoint details.
