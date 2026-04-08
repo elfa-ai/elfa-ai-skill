@@ -1,5 +1,5 @@
 ---
-name: elfa-api
+name: elfa-ai
 description: >
   Interact with the Elfa API — a crypto social intelligence platform that provides real-time
   sentiment, trending tokens, narrative tracking, and AI-powered market analysis from Twitter/X

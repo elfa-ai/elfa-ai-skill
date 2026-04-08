@@ -1,79 +1,103 @@
-# Elfa API Skill
+# Elfa AI Skills
 
 Real-time crypto social intelligence for AI coding agents. Track trending tokens, surface narratives, search mentions, and run market analysis — all from your agent's chat.
 
 Works with **Claude Code**, **OpenCode**, **Cursor**, **GitHub Copilot**, **Codex**, and any tool that supports the [Agent Skills](https://agentskills.io) standard.
 
-## What it does
+## Installation
 
-- Pull trending tokens and contract addresses from Twitter/X and Telegram
-- Search social mentions by ticker or keyword
-- Get smart follower and engagement stats for any Twitter/X account
-- Surface trending narratives and event summaries
-- Run AI-powered market analysis, token breakdowns, and account reviews
-- Generate ready-to-use integration code (TypeScript, Python, curl)
+### Any Agent (Recommended)
 
-With an API key or x402 wallet, your agent makes live calls and returns real data. Without either, it generates correct code snippets you can use in your own app.
+```bash
+npx skills add elfa-ai/elfa-ai-skill
+```
 
-## Install
+This uses the [Skills CLI](https://github.com/vercel-labs/skills) to install skills via symlink. Works with Claude Code, Cursor, Windsurf, Codex, and [40+ other agents](https://github.com/vercel-labs/skills#supported-agents). Skills stay up to date — run `npx skills update` to pull the latest.
 
-### Claude Code
+Install globally (available across all projects):
+
+```bash
+npx skills add elfa-ai/elfa-ai-skill --global
+```
+
+### Manual Install
+
+<details>
+<summary>Claude Code</summary>
 
 ```bash
 # Project-level (this project only)
-mkdir -p .claude/skills/elfa-api
-cp SKILL.md .claude/skills/elfa-api/
-cp -r references/ scripts/ .claude/skills/elfa-api/
+mkdir -p .claude/skills/elfa-ai
+cp skills/elfa-ai/SKILL.md .claude/skills/elfa-ai/
+cp -r skills/elfa-ai/references/ skills/elfa-ai/scripts/ .claude/skills/elfa-ai/
 
 # Global (all projects)
-mkdir -p ~/.claude/skills/elfa-api
-cp SKILL.md ~/.claude/skills/elfa-api/
-cp -r references/ scripts/ ~/.claude/skills/elfa-api/
+mkdir -p ~/.claude/skills/elfa-ai
+cp skills/elfa-ai/SKILL.md ~/.claude/skills/elfa-ai/
+cp -r skills/elfa-ai/references/ skills/elfa-ai/scripts/ ~/.claude/skills/elfa-ai/
 ```
 
-### OpenCode
+</details>
+
+<details>
+<summary>OpenCode</summary>
 
 ```bash
-mkdir -p ~/.config/opencode/skills/elfa-api
-cp SKILL.md ~/.config/opencode/skills/elfa-api/
-cp -r references/ scripts/ ~/.config/opencode/skills/elfa-api/
+mkdir -p ~/.config/opencode/skills/elfa-ai
+cp skills/elfa-ai/SKILL.md ~/.config/opencode/skills/elfa-ai/
+cp -r skills/elfa-ai/references/ skills/elfa-ai/scripts/ ~/.config/opencode/skills/elfa-ai/
 ```
 
-### Cursor
+</details>
+
+<details>
+<summary>Cursor</summary>
 
 ```bash
 mkdir -p .cursor/rules
-# Add frontmatter for auto-activation, then append skill content
-echo '---' > .cursor/rules/elfa-api.mdc
-echo 'description: "Elfa API — crypto social intelligence, trending tokens, mentions, and market analysis"' >> .cursor/rules/elfa-api.mdc
-echo 'alwaysApply: true' >> .cursor/rules/elfa-api.mdc
-echo '---' >> .cursor/rules/elfa-api.mdc
-cat SKILL.md >> .cursor/rules/elfa-api.mdc
+echo '---' > .cursor/rules/elfa-ai.mdc
+echo 'description: "Elfa AI — crypto social intelligence, trending tokens, mentions, and market analysis"' >> .cursor/rules/elfa-ai.mdc
+echo 'alwaysApply: true' >> .cursor/rules/elfa-ai.mdc
+echo '---' >> .cursor/rules/elfa-ai.mdc
+cat skills/elfa-ai/SKILL.md >> .cursor/rules/elfa-ai.mdc
 ```
 
-### GitHub Copilot
+</details>
 
-Copy the skill contents into your repo's Copilot instructions:
+<details>
+<summary>GitHub Copilot</summary>
 
 ```bash
-cat SKILL.md >> .github/copilot-instructions.md
+cat skills/elfa-ai/SKILL.md >> .github/copilot-instructions.md
 ```
 
-### Codex
+</details>
 
-Add `SKILL.md` to your repo — Codex reads `AGENTS.md` and skill files from the project root:
+<details>
+<summary>Codex</summary>
 
 ```bash
-cp SKILL.md AGENTS.md
+cp skills/elfa-ai/SKILL.md AGENTS.md
 ```
 
-### Claude Desktop (attach file)
+</details>
+
+<details>
+<summary>Claude Desktop (attach file)</summary>
 
 1. Start a conversation in Claude Desktop
-2. Attach `SKILL.md` as a file
+2. Attach `skills/elfa-ai/SKILL.md` as a file
 3. Ask Claude to use the skill
 
-For a bundled package with API docs and scripts included, run `./scripts/build-skill.sh` and attach the generated `dist/elfa-api.skill` instead.
+For a bundled package with API docs and scripts included, run `./skills/elfa-ai/scripts/build-skill.sh` and attach the generated `dist/elfa-ai.skill` instead.
+
+</details>
+
+## Skills
+
+| Skill | Description |
+|---|---|
+| [elfa-ai](skills/elfa-ai) | Crypto social intelligence — trending tokens, mentions, narratives, and AI market analysis |
 
 ## Get an API key
 
@@ -110,21 +134,6 @@ Give me a curl example for the keyword mentions endpoint
 ```
 Help me integrate the Elfa trending tokens endpoint in TypeScript
 ```
-
-## What's inside
-
-```
-├── SKILL.md                  # Skill definition (Agent Skills standard)
-├── references/
-│   └── swagger.json          # OpenAPI 3.0 spec
-└── scripts/
-    ├── elfa_call.sh          # Helper script for live API calls
-    └── build-skill.sh        # Build .skill package for Claude Desktop
-```
-
-- **`SKILL.md`** — The skill itself. Contains YAML frontmatter (name, description, env vars, credentials) and step-by-step instructions for the agent. Follows the [Agent Skills](https://agentskills.io) open standard.
-- **`references/`** — Contains the OpenAPI 3.0 spec (`swagger.json`) for machine-readable endpoint details.
-- **`scripts/`** — `elfa_call.sh` is a bash helper for making authenticated API calls. `build-skill.sh` packages everything into a `.skill` ZIP for Claude Desktop.
 
 ## API endpoints
 
