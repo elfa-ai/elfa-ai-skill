@@ -5,29 +5,30 @@
 # instead of copying individual files.
 #
 # Usage:
-#   ./scripts/build-skill.sh
+#   ./skills/elfa-ai/scripts/build-skill.sh
 #
 # Output:
-#   dist/elfa-api.skill
+#   dist/elfa-ai.skill
 
 set -euo pipefail
 
-REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+REPO_ROOT="$(cd "$SKILL_DIR/../.." && pwd)"
 DIST_DIR="$REPO_ROOT/dist"
-SKILL_NAME="elfa-api"
+SKILL_NAME="elfa-ai"
 OUTPUT="$DIST_DIR/${SKILL_NAME}.skill"
 
 rm -rf "$DIST_DIR"
 mkdir -p "$DIST_DIR"
 
-# Stage files under elfa-api/ directory and zip
+# Stage files under elfa-ai/ directory and zip
 STAGING=$(mktemp -d)
 trap 'rm -rf "$STAGING"' EXIT
 
 mkdir -p "$STAGING/$SKILL_NAME/references" "$STAGING/$SKILL_NAME/scripts"
-cp "$REPO_ROOT/SKILL.md" "$STAGING/$SKILL_NAME/"
-cp "$REPO_ROOT/references/swagger.json" "$STAGING/$SKILL_NAME/references/"
-cp "$REPO_ROOT/scripts/elfa_call.sh" "$STAGING/$SKILL_NAME/scripts/"
+cp "$SKILL_DIR/SKILL.md" "$STAGING/$SKILL_NAME/"
+cp "$SKILL_DIR/references/swagger.json" "$STAGING/$SKILL_NAME/references/"
+cp "$SKILL_DIR/scripts/elfa_call.sh" "$STAGING/$SKILL_NAME/scripts/"
 
 cd "$STAGING"
 zip -r "$OUTPUT" "$SKILL_NAME/"
