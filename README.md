@@ -1,6 +1,6 @@
 # Elfa AI Skills
 
-Real-time crypto social intelligence for AI coding agents. Track trending tokens, surface narratives, search mentions, and run market analysis — all from your agent's chat.
+Real-time crypto social intelligence and automated condition engine for AI coding agents. Track trending tokens, surface narratives, search mentions, run market analysis, and build automated trigger-based workflows — all from your agent's chat.
 
 Works with **Claude Code**, **OpenCode**, **Cursor**, **GitHub Copilot**, **Codex**, and any tool that supports the [Agent Skills](https://agentskills.io) standard.
 
@@ -97,7 +97,7 @@ For a bundled package with API docs and scripts included, run `./skills/elfa-ai/
 
 | Skill | Description |
 |---|---|
-| [elfa-ai](skills/elfa-ai) | Crypto social intelligence — trending tokens, mentions, narratives, and AI market analysis |
+| [elfa-ai](skills/elfa-ai) | Crypto social intelligence + Auto condition engine — trending tokens, mentions, narratives, AI market analysis, and automated trigger workflows |
 
 ## Get an API key
 
@@ -135,6 +135,22 @@ Give me a curl example for the keyword mentions endpoint
 Help me integrate the Elfa trending tokens endpoint in TypeScript
 ```
 
+```
+Alert me when BTC crosses above 100k
+```
+
+```
+Set up a recurring 4h portfolio check on BTC, ETH, and SOL
+```
+
+```
+Create an Auto query that triggers when ETH RSI drops below 30 on the 1h chart
+```
+
+```
+Help me build a multi-condition trigger for BTC + ETH breakout confirmation
+```
+
 ## API endpoints
 
 | Endpoint | Description |
@@ -150,8 +166,21 @@ Help me integrate the Elfa trending tokens endpoint in TypeScript
 | `/v2/aggregations/trending-cas/telegram` | Trending contract addresses (Telegram) |
 | `/v2/chat` | AI chat — market analysis, token intros, account reviews |
 
+### Auto endpoints (Condition Engine)
+
+| Endpoint | Description |
+|---|---|
+| `/v2/auto/chat` | Builder Chat — AI-assisted query building |
+| `/v2/auto/queries/validate` | Validate EQL query and preview cost |
+| `/v2/auto/queries` | Create, list, poll Auto queries |
+| `/v2/auto/queries/:queryId/stream` | Stream notifications via SSE |
+| `/v2/auto/queries/:queryId/sessions` | List/get LLM analysis sessions |
+| `/v2/auto/validate-symbol/:symbol` | Check symbol support for conditions |
+
+Auto endpoints require HMAC signing for mutations (API key mode) or x-elfa-agent-secret (x402 mode). See [Auto docs](https://docs.elfa.ai/auto/overview).
+
 Full details at [docs.elfa.ai](https://docs.elfa.ai).
 
 ---
 
-Powered by [Elfa AI](https://go.elfa.ai/claude-visit) · [Documentation](https://docs.elfa.ai)
+Powered by [Elfa AI](https://go.elfa.ai/claude-visit) · [Documentation](https://docs.elfa.ai) · [Auto Docs](https://docs.elfa.ai/auto/overview)
