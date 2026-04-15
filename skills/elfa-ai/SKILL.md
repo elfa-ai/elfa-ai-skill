@@ -124,7 +124,6 @@ See [Auto docs](https://docs.elfa.ai/auto/overview) for full details.
 | `/v2/auto/queries/:queryId/sessions` | GET | List LLM sessions | API key |
 | `/v2/auto/queries/:queryId/sessions/:sessionId` | GET | Get LLM session details | API key |
 | `/v2/auto/validate-symbol/:symbol` | GET | Check symbol support | API key |
-| `/v2/auto/unmet-intent` | POST | Report unsupported intent | API key |
 
 **x402 mode (`/x402/v2/auto/*`)** — note: some routes use POST instead of GET:
 
@@ -139,7 +138,6 @@ See [Auto docs](https://docs.elfa.ai/auto/overview) for full details.
 | `/x402/v2/auto/queries/:queryId/sessions` | POST | List LLM sessions (POST, not GET) |
 | `/x402/v2/auto/queries/:queryId/sessions/:sessionId` | POST | Get LLM session details (POST, not GET) |
 | `/x402/v2/auto/validate-symbol/:symbol` | GET | Check symbol support |
-| `/x402/v2/auto/unmet-intent` | POST | Report unsupported intent (free) |
 
 For full parameter details, see the [Elfa API documentation](https://docs.elfa.ai).
 
