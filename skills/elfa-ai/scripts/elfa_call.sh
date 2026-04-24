@@ -61,6 +61,21 @@ Auto endpoint HMAC signing:
            /v2/auto/chat     →  mounted_path = /chat
            /v2/auto/queries/q_123  →  mounted_path = /queries/q_123
 
+  Endpoints that DO require HMAC:
+    POST   /v2/auto/chat
+    POST   /v2/auto/queries                              (create)
+    DELETE /v2/auto/queries/{queryId}                    (cancel)
+    POST   /v2/auto/queries/drafts/{draftId}/convert     (draft → active query)
+    POST   /v2/auto/exchanges                            (connect)
+    DELETE /v2/auto/exchanges/{exchange}                 (disconnect)
+
+  Endpoints that do NOT require HMAC (auto-detected, skipped):
+    POST   /v2/auto/queries/validate
+    POST   /v2/auto/queries/preview
+    POST   /v2/auto/queries/drafts                       (upsert draft)
+    DELETE /v2/auto/queries/drafts/{draftId}             (discard draft)
+    POST   /v2/auto/queries/drafts/{draftId}/preview
+
 Examples:
   # API key mode (reads ELFA_API_KEY from env)
   ./elfa_call.sh /v2/ping
@@ -70,14 +85,29 @@ Examples:
   # x402 mode (pay-per-request with USDC on Base)
   ./elfa_call.sh /v2/aggregations/trending-tokens --x402 --payment '<base64-payload>'
 
-  # Auto: validate a query (read-only, no HMAC needed)
+  # Auto: validate a query (no HMAC needed)
   ./elfa_call.sh /v2/auto/queries/validate -d '{"query":{...}}'
 
-  # Auto: create a query (mutation, HMAC auto-applied)
+  # Auto: preview a query without creating it (no HMAC needed)
+  ./elfa_call.sh /v2/auto/queries/preview -d '{"query":{...}}'
+
+  # Auto: create a query (HMAC auto-applied)
   ./elfa_call.sh /v2/auto/queries -d '{"query":{...}}' --hmac-secret "$ELFA_HMAC_SECRET"
 
-  # Auto: cancel a query (mutation, HMAC auto-applied)
+  # Auto: cancel a query (HMAC auto-applied)
   ./elfa_call.sh /v2/auto/queries/q_123 -X DELETE --hmac-secret "$ELFA_HMAC_SECRET"
+
+  # Auto: upsert a draft (no HMAC needed)
+  ./elfa_call.sh /v2/auto/queries/drafts -d '{"query":{...}}'
+
+  # Auto: convert a draft to active query (HMAC auto-applied)
+  ./elfa_call.sh /v2/auto/queries/drafts/d_123/convert -X POST --hmac-secret "$ELFA_HMAC_SECRET"
+
+  # Auto: list executions
+  ./elfa_call.sh /v2/auto/executions
+
+  # Auto: connect an exchange (HMAC auto-applied)
+  ./elfa_call.sh /v2/auto/exchanges -d '{"exchange":"hyperliquid",...}' --hmac-secret "$ELFA_HMAC_SECRET"
 
   # Auto x402: create query with agent secret
   ./elfa_call.sh /v2/auto/queries --x402 --payment '<payload>' --agent-secret "$ELFA_AGENT_SECRET"
@@ -143,19 +173,32 @@ fi
 # Determine whether this is an Auto mutation that requires HMAC signing.
 # We check the *original* endpoint (before x402 rewrite) by examining whether
 # the path contains /auto/ and the method is POST or DELETE.
+#
+# HMAC required (per docs): create/cancel query, builder chat, connect/disconnect
+# exchange, convert draft → active query.
+#
+# HMAC NOT required (per docs): validate, preview (non-draft), draft upsert,
+# draft delete, draft preview, draft get — drafts are a staging area and don't
+# trigger anything until converted.
 IS_AUTO_MUTATION=false
 IS_AUTO_ENDPOINT=false
 # Use the original endpoint for detection (strip /x402 prefix if present)
 ORIGINAL_ENDPOINT="${ENDPOINT#/x402}"
 if [[ "$ORIGINAL_ENDPOINT" == /v2/auto/* ]]; then
   IS_AUTO_ENDPOINT=true
-  # Mutations need HMAC signing — POST or DELETE, but NOT /queries/validate (read-only POST)
   if [[ "$METHOD" == "POST" || "$METHOD" == "DELETE" ]]; then
-    # Exclude validate endpoint — it's a POST but doesn't require HMAC
     MOUNTED_CHECK="${ORIGINAL_ENDPOINT#/v2/auto}"
-    if [[ "$MOUNTED_CHECK" != "/queries/validate" ]]; then
-      IS_AUTO_MUTATION=true
-    fi
+    case "$MOUNTED_CHECK" in
+      /queries/validate)            ;;  # validate: no HMAC
+      /queries/preview)             ;;  # preview a query: no HMAC
+      /queries/drafts)              ;;  # upsert draft: no HMAC
+      /queries/drafts/*/convert)
+        IS_AUTO_MUTATION=true       ;;  # convert draft → active query: HMAC
+      /queries/drafts/*/preview)    ;;  # preview a stored draft: no HMAC
+      /queries/drafts/*)            ;;  # get/delete draft: no HMAC
+      *)
+        IS_AUTO_MUTATION=true       ;;  # all other POST/DELETE on /v2/auto/*: HMAC
+    esac
   fi
 fi
 
