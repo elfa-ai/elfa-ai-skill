@@ -163,7 +163,6 @@ _Other:_
 | Endpoint | Method | Description | Auth |
 |---|---|---|---|
 | `/v2/auto/validate-symbol/:symbol` | GET | Check symbol support for conditions | API key |
-| `/v2/auto/unmet-intent` | POST | Report an unsupported use case (after substitution ladder) | API key |
 
 **x402 mode (`/x402/v2/auto/*`)** — note: some routes use POST instead of GET:
 
@@ -178,7 +177,6 @@ _Other:_
 | `/x402/v2/auto/queries/:queryId/sessions` | POST | List LLM sessions (POST, not GET) |
 | `/x402/v2/auto/queries/:queryId/sessions/:sessionId` | POST | Get LLM session details (POST, not GET) |
 | `/x402/v2/auto/validate-symbol/:symbol` | GET | Check symbol support |
-| `/x402/v2/auto/unmet-intent` | POST | Report an unsupported use case |
 
 > **Note on x402 Auto scope.** Trade execution actions are not available via x402. Exchange connections, drafts, and executions endpoints are API-key-mode only. x402 Auto covers the core monitoring lifecycle (chat, validate, create, poll, cancel, stream, sessions).
 
@@ -490,7 +488,6 @@ existing queries/sessions may become inaccessible.
 | `GET /v2/auto/queries/*` (list, poll, stream, sessions) | Free | |
 | `DELETE /v2/auto/queries/:queryId` (Cancel) | Free | |
 | `GET /v2/auto/validate-symbol/:symbol` | Free | |
-| `POST /v2/auto/unmet-intent` | Free | Not billed |
 
 > Reference USD values for Create: baseline `$0.045`, fast call `+$0.045`, expert call `+$0.162`. Use `/queries/validate` to preview exact cost before committing.
 
@@ -504,7 +501,6 @@ existing queries/sessions may become inaccessible.
 | Per fast LLM call | +5 | +$0.045 |
 | Per expert LLM call | +18 | +$0.162 |
 | Validate, poll, cancel, sessions, stream | Free | Free |
-| Unmet-intent | Free | Free |
 
 **x402 Auto example:**
 
@@ -1212,10 +1208,6 @@ rung 1 or 2.
 4. **Use `source: "llm"`** with `athena_condition` for fuzzy/narrative predicates.
 5. **Pre-compute in your own service, use Auto as control plane** — only after rungs 1–4 fail.
 
-**Between rung 4 and rung 5, report the gap via `POST /v2/auto/unmet-intent`** (or
-`POST /x402/v2/auto/unmet-intent`). This does not replace the ladder — it captures the gap
-while you proceed with a fallback.
-
 **Worked example — "alert on descending trendline break":**
 
 - **Rung 1:** Rephrase as a supported proxy — _"alert when BTC price crosses above 4h upper Bollinger Band AND 1h RSI > 55"_.
@@ -1223,80 +1215,6 @@ while you proceed with a fallback.
 - **Rung 5:** Only if both fail: compute trendline-break externally, feed a boolean into an Auto `cron` + `llm` query as the condition trigger.
 
 Do not build your own monitoring/evaluation/trigger stack before walking rungs 1–4.
-
-#### Report Unmet Intent — `POST /v2/auto/unmet-intent`
-
-Use when `/auto` can't express your intent after walking the substitution ladder. Calls
-are logged for review. The endpoint always returns a clean acknowledgement so you can
-keep iterating instead of abandoning `/auto`.
-
-**Routes:**
-
-| Mode | Route | Auth | Charge |
-|---|---|---|---|
-| API key | `POST /v2/auto/unmet-intent` | `x-elfa-api-key` | Free |
-| x402 keyless | `POST /x402/v2/auto/unmet-intent` | x402 payment headers | Free (not billed) |
-
-**Request body:**
-
-```typescript
-{
-  category: "symbol"
-          | "indicator"
-          | "data_source"
-          | "operator"
-          | "action_type"
-          | "delivery_integration"
-          | "query_shape"
-          | "other",
-  description: string,              // required, 10–2000 chars
-  attemptedQuery?: object,          // optional, ≤ 16KB serialized
-  nearestSupported?: object,        // optional — helps calibrate gap
-  agentContext?: {
-    agentName?: string,             // e.g. "claude-code"
-    agentVersion?: string,
-    userGoal?: string               // 1-sentence end-user goal
-  }
-}
-```
-
-**Validation rules:**
-- `category` and `description` are required.
-- `attemptedQuery` must not exceed 16KB serialized.
-- Unknown top-level keys are stripped and ignored.
-
-**Field guidance:**
-- `category` — pick the closest match; use `other` only when none fits.
-- `description` — describe the intent, not the error. Example: _"wanted to trigger on a descending-trendline break on BTC 4h"_, not _"validate failed"_.
-- `attemptedQuery` — include the query JSON you tried — most useful field for prioritization.
-- `nearestSupported` — include your fallback if you have one — calibrates gap severity.
-- `agentContext` — agent name/version + 1-sentence user goal help cluster similar requests.
-
-**Response** (always HTTP 200 on successful logging):
-
-```json
-{ "requestId": "550e8400-e29b-41d4-a716-446655440000", "status": "logged" }
-```
-
-Error responses: `400` (validation failure), `401` (auth), `429` (rate limit — retry after
-`Retry-After` header).
-
-**Example:**
-
-```bash
-curl -X POST https://api.elfa.ai/v2/auto/unmet-intent \
-  -H "x-elfa-api-key: $ELFA_API_KEY" \
-  -H "content-type: application/json" \
-  -d '{
-    "category": "indicator",
-    "description": "Wanted to trigger when BTC breaks a descending trendline on 4h. No TA method maps cleanly to trendline-break.",
-    "attemptedQuery": { "title": "BTC trendline break 4h", "conditions": { "AND": [{ "source": "ta", "method": "trendline_break", "args": { "symbol": "BTC", "timeframe": "4h" }, "operator": "==", "value": true }] }, "actions": [{ "stepId": "step_1", "type": "webhook", "params": { "url": "https://your-runner.example/auto/events" } }], "expiresIn": "24h" },
-    "nearestSupported": { "title": "BTC proxy: price crosses 4h upper BBand", "conditions": { "AND": [{ "source": "price", "method": "current", "args": { "symbol": "BTC" }, "operator": "crosses_above", "value": { "source": "ta", "method": "bbands_upper", "args": { "symbol": "BTC", "timeframe": "4h" } } }] }, "actions": [{ "stepId": "step_1", "type": "webhook", "params": { "url": "https://your-runner.example/auto/events" } }], "expiresIn": "24h" },
-    "agentContext": { "agentName": "claude-code", "agentVersion": "0.x", "userGoal": "Alert me to BTC 4h trendline breaks" }
-  }'
-```
-
-Full detail: [Report Unmet Intent](https://docs.elfa.ai/auto/unmet-intent).
 
 #### Query drafts
 

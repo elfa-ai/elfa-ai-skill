@@ -180,7 +180,6 @@ Help me build a multi-condition trigger for BTC + ETH breakout confirmation
 | `/v2/auto/executions` | List and get trigger execution records |
 | `/v2/auto/exchanges` | Connect, list, disconnect exchange integrations |
 | `/v2/auto/validate-symbol/:symbol` | Check symbol support for conditions |
-| `/v2/auto/unmet-intent` | Report an unsupported use case |
 
 Auto endpoints require HMAC signing for mutations (API key mode) or x-elfa-agent-secret (x402 mode). See [Auto docs](https://docs.elfa.ai/auto/overview).
 
