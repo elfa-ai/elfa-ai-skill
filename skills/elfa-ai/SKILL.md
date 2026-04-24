@@ -112,18 +112,58 @@ See [Auto docs](https://docs.elfa.ai/auto/overview) for full details.
 
 **API key mode (`/v2/auto/*`):**
 
+_Query lifecycle:_
+
 | Endpoint | Method | Description | Auth |
 |---|---|---|---|
 | `/v2/auto/chat` | POST | Builder Chat — AI-assisted query building | HMAC |
 | `/v2/auto/queries/validate` | POST | Validate EQL and preview cost | API key only |
+| `/v2/auto/queries/preview` | POST | Preview a query without creating it | API key |
 | `/v2/auto/queries` | POST | Create and activate a query | HMAC |
 | `/v2/auto/queries` | GET | List queries | API key |
-| `/v2/auto/queries/:queryId` | GET | Poll query status and executions | API key |
+| `/v2/auto/queries/:queryId` | GET | Poll query status and executions (resolves query or draft) | API key |
 | `/v2/auto/queries/:queryId` | DELETE | Cancel a query | HMAC |
 | `/v2/auto/queries/:queryId/stream` | GET | Stream notifications via SSE | API key |
+
+_Query drafts (editable, not yet active):_
+
+| Endpoint | Method | Description | Auth |
+|---|---|---|---|
+| `/v2/auto/queries/drafts` | POST | Create or update (upsert) a query draft | API key |
+| `/v2/auto/queries/drafts` | GET | List editable query drafts | API key |
+| `/v2/auto/queries/drafts/:draftId` | GET | Get a specific draft (legacy — prefer `GET /queries/{queryId}`) | API key |
+| `/v2/auto/queries/drafts/:draftId` | DELETE | Delete a query draft | API key |
+| `/v2/auto/queries/drafts/:draftId/preview` | POST | Preview a stored draft | API key |
+| `/v2/auto/queries/drafts/:draftId/convert` | POST | Convert a draft into an active query | HMAC |
+
+_LLM sessions (for `action.type: "llm"` queries):_
+
+| Endpoint | Method | Description | Auth |
+|---|---|---|---|
 | `/v2/auto/queries/:queryId/sessions` | GET | List LLM sessions | API key |
-| `/v2/auto/queries/:queryId/sessions/:sessionId` | GET | Get LLM session details | API key |
-| `/v2/auto/validate-symbol/:symbol` | GET | Check symbol support | API key |
+| `/v2/auto/queries/:queryId/sessions/:sessionId` | GET | Get full LLM session details | API key |
+
+_Executions (trigger fire records):_
+
+| Endpoint | Method | Description | Auth |
+|---|---|---|---|
+| `/v2/auto/executions` | GET | List execution records | API key |
+| `/v2/auto/executions/:executionId` | GET | Get a single execution record | API key |
+
+_Exchange connections (for live trade actions):_
+
+| Endpoint | Method | Description | Auth |
+|---|---|---|---|
+| `/v2/auto/exchanges` | POST | Connect an exchange integration | HMAC |
+| `/v2/auto/exchanges` | GET | List connected exchanges | API key |
+| `/v2/auto/exchanges/:exchange` | DELETE | Disconnect an exchange | HMAC |
+
+_Other:_
+
+| Endpoint | Method | Description | Auth |
+|---|---|---|---|
+| `/v2/auto/validate-symbol/:symbol` | GET | Check symbol support for conditions | API key |
+| `/v2/auto/unmet-intent` | POST | Report an unsupported use case (after substitution ladder) | API key |
 
 **x402 mode (`/x402/v2/auto/*`)** — note: some routes use POST instead of GET:
 
@@ -138,8 +178,17 @@ See [Auto docs](https://docs.elfa.ai/auto/overview) for full details.
 | `/x402/v2/auto/queries/:queryId/sessions` | POST | List LLM sessions (POST, not GET) |
 | `/x402/v2/auto/queries/:queryId/sessions/:sessionId` | POST | Get LLM session details (POST, not GET) |
 | `/x402/v2/auto/validate-symbol/:symbol` | GET | Check symbol support |
+| `/x402/v2/auto/unmet-intent` | POST | Report an unsupported use case |
+
+> **Note on x402 Auto scope.** Trade execution actions are not available via x402. Exchange connections, drafts, and executions endpoints are API-key-mode only. x402 Auto covers the core monitoring lifecycle (chat, validate, create, poll, cancel, stream, sessions).
 
 For full parameter details, see the [Elfa API documentation](https://docs.elfa.ai).
+
+**Machine-readable manifest:** an endpoint manifest is published at
+`https://docs.elfa.ai/assets/files/endpoints.manifest-*.json` (path rotates per release) —
+each entry includes method/path, docs route, required headers, HMAC requirement with mounted
+signature path template, payment requirement, and request/response examples. Useful for
+auto-generating client code.
 
 ## How to use this skill
 
@@ -428,7 +477,24 @@ Persist as `ELFA_AGENT_SECRET`. **Do not rotate per request** — x402 session o
 derived from `SHA256(secret)`. If you change secrets, your agent identity changes and
 existing queries/sessions may become inaccessible.
 
-**x402 Auto pricing (70% discount — limited time):**
+#### Auto pricing (both modes)
+
+**API-key mode (`/v2/auto/*`) — charged against your credit balance:**
+
+| Operation | Credits | Notes |
+|---|---|---|
+| `POST /v2/auto/chat` (Builder Chat) | `1 + dynamic` | Base 1 credit + `ceil(request_cost * 750)` dynamic charge based on LLM usage |
+| `POST /v2/auto/queries` (Create) | Simulation-driven | Baseline `5` + per simulated LLM call: fast `+5`, expert `+18` |
+| `POST /v2/auto/queries/validate` | Free | Returns cost estimate — always call before Create |
+| `POST /v2/auto/queries/preview` | Free | Preview without creating |
+| `GET /v2/auto/queries/*` (list, poll, stream, sessions) | Free | |
+| `DELETE /v2/auto/queries/:queryId` (Cancel) | Free | |
+| `GET /v2/auto/validate-symbol/:symbol` | Free | |
+| `POST /v2/auto/unmet-intent` | Free | Not billed |
+
+> Reference USD values for Create: baseline `$0.045`, fast call `+$0.045`, expert call `+$0.162`. Use `/queries/validate` to preview exact cost before committing.
+
+**x402 mode (`/x402/v2/auto/*`) — 70% discount, limited-time, pay-per-request in USDC on Base:**
 
 | Operation | Credits | USDC Cost |
 |---|---|---|
@@ -438,6 +504,7 @@ existing queries/sessions may become inaccessible.
 | Per fast LLM call | +5 | +$0.045 |
 | Per expert LLM call | +18 | +$0.162 |
 | Validate, poll, cancel, sessions, stream | Free | Free |
+| Unmet-intent | Free | Free |
 
 **x402 Auto example:**
 
@@ -461,7 +528,7 @@ const response = await x402Fetch(
   });
 ```
 
-#### Recommended call sequence
+#### Recommended call sequence (deterministic agent path)
 
 **API key mode (`/v2/auto/*`):**
 
@@ -469,7 +536,7 @@ const response = await x402Fetch(
 2. `POST /v2/auto/queries/validate` — Validate EQL and preview cost
 3. `POST /v2/auto/queries` — Create and activate
 4. `GET /v2/auto/queries/{queryId}/stream` — Stream notifications (or poll)
-5. `GET /v2/auto/queries/{queryId}/sessions/{sessionId}` — Fetch LLM output (if using `llm` action)
+5. `GET /v2/auto/queries/{queryId}/sessions` + `/sessions/{sessionId}` — Fetch LLM output (if using `llm` action)
 
 **x402 mode (`/x402/v2/auto/*`):**
 
@@ -477,10 +544,34 @@ const response = await x402Fetch(
 2. `POST /x402/v2/auto/queries/validate` — Validate EQL and preview cost
 3. `POST /x402/v2/auto/queries` — Create and activate
 4. `GET /x402/v2/auto/queries/{queryId}/stream` — Stream notifications (or poll via POST)
-5. `POST /x402/v2/auto/queries/{queryId}/sessions/{sessionId}` — Fetch LLM output
+5. `POST /x402/v2/auto/queries/{queryId}/sessions` + `/sessions/{sessionId}` — Fetch LLM output
 
 **Always validate before create.** Validate returns structured errors you can iterate on
 without spending credits.
+
+**Failure handling order** (apply in sequence):
+
+1. Retry transient network errors with exponential backoff.
+2. On `400` / `422` validation failure → repair query using [Validation Errors table](#validation-errors--next-action-table), re-validate.
+3. On `401` / `403` auth failure → refresh credentials or verify Auto is enabled for the API key.
+4. On `402` x402 payment failure → re-price and retry with valid payment payload.
+5. On `410` (SSE stream closed) → re-open stream or fall back to polling.
+
+**Common agent flows:**
+
+_Poll-based LLM flow:_
+```
+POST /v2/auto/queries                               → create query with action.type = "llm"
+GET  /v2/auto/queries/{queryId}                     → poll until execution with sessionId appears
+GET  /v2/auto/queries/{queryId}/sessions/{sessionId} → fetch full analysis
+```
+
+_Webhook-based LLM flow:_
+```
+POST /v2/auto/queries                               → create with action.type = "llm" + callback webhook
+(wait for webhook)                                  → receive session reference / output
+(optional) GET session fetch                        → /v2/auto/queries/{queryId}/sessions/{sessionId}
+```
 
 #### Builder Chat
 
@@ -495,14 +586,106 @@ natural language into EQL queries. Use `sessionId` for multi-turn conversations.
 }
 ```
 
-The response contains EQL in a JSON code block — extract, validate, and submit.
+Response (API-key mode):
+
+```json
+{
+  "sessionId": "session-uuid",
+  "response": "I can help with that... (markdown + EQL JSON code block)",
+  "title": "BTC Breakout Alert",
+  "reasoning": null,
+  "planIds": []
+}
+```
+
+The response message contains the AI's reply in Markdown. When it generates EQL, it will be
+in a JSON code block — extract, validate via `/queries/validate`, then submit via `/queries`.
 
 **Prompting tips for Builder Chat:**
-- Include `title` and `description` (shown in notifications so recipients know what fired)
+- Include `title` and `description` (shown in notifications so recipients know what fired hours/days later)
 - Specify symbols, timeframe, trigger behavior (one-time vs recurring), delivery target
-- Append `"If anything is unsupported, return the closest supported query and list substitutions"`
-  to handle edge cases gracefully
+- Append `"If anything is unsupported, return the closest supported query and list substitutions"` to handle edge cases gracefully
 - Prefer `expiresIn` of `24h`–`3d` for fresh signals
+- Persist `sessionId` and reuse it for follow-up prompts so the model keeps context across turns
+
+**High-impact prompt pack** — drop these into `POST /v2/auto/chat` as the `message` field:
+
+_1) Complex TA breakout with direction filter:_
+
+```
+Build an Auto query:
+- title + description: short human-readable summary and 1-2 sentence thesis
+- symbols: BTC, ETH, SOL
+- timeframe: 5m
+- trigger when price breaks previous 1h range high or low
+- confirm direction with RSI(14): >55 for upside, <45 for downside
+- actions: telegram alert + webhook to https://your-runner.example/auto/events
+- one-time trigger, expires in 48h
+If anything is unsupported, return the closest supported query and list substitutions.
+```
+
+_2) CEX + DEX monitoring pack:_
+
+```
+Build an Auto query pack for supported CEX + DEX symbols:
+- title + description per query: short summary and thesis sentence
+- watchlist: WBTC, ETH, SOL, HYPE
+- trigger when 15m volume surge aligns with price momentum
+- action: webhook to https://your-runner.example/auto/events
+- include symbol and trigger summary in payload
+- expires in 24h
+If any symbol/source is unsupported, skip it and report skipped items.
+```
+
+_3) News + X sentiment context on trigger:_
+
+```
+Build an Auto query:
+- title + description: short summary and the thesis behind watching this
+- monitor BTC and ETH for abnormal 1h move + volume confirmation
+- on trigger run llm action that adds:
+  - latest market news context
+  - X sentiment summary
+  - risk note
+- also send telegram alert with a short summary
+- expires in 24h
+```
+
+_4) Prediction-market thesis watcher:_
+
+```
+Build an Auto query:
+- title + description: name the thesis basket and state the catalyst you're watching for
+- monitor tokens in my prediction-market thesis basket
+- trigger on rapid momentum shift with volume confirmation
+- action: llm to produce catalyst hypothesis + invalidation level
+- deliver to webhook: https://your-runner.example/auto/events
+- include decision priority: high/medium/low
+- expires in 2d
+```
+
+_5) Portfolio risk guardrail:_
+
+```
+Build an Auto query:
+- title + description: portfolio guardrail label and the risk scenario it covers
+- watch my portfolio symbols: BTC, ETH, SOL, HYPE
+- trigger on downside acceleration and momentum weakness
+- action: telegram alert with severity and suggested next check
+- recurring checks, expires in 3d
+```
+
+_6) Agent handoff with strict execution contract:_
+
+```
+Build an Auto query:
+- title + description: breakout playbook name and the execution intent
+- trigger on breakout + trend-confirmation conditions
+- action: webhook to https://your-runner.example/auto/events
+- include fields: eventId, symbol, triggerReason, priority, queryId
+- objective: downstream agent decides next action under policy constraints
+- expires in 24h
+```
 
 #### Query model (EQL)
 
@@ -715,22 +898,125 @@ actions per query).
 }
 ```
 
-#### Notifications and agent runner
+#### Poll response shape
 
-After a query triggers, Auto delivers events via webhook, Telegram, or SSE. For production
-agents, use a **background runner** that receives events and continues your workflow:
+`GET /v2/auto/queries/{queryId}` (and the x402 `POST` equivalent) returns:
 
-1. Receive Auto event (webhook/SSE)
-2. Verify signature + deduplicate by `eventId`
-3. Enqueue job → let worker decide next step
-4. Execute downstream action
+```json
+{
+  "queryId": "q_123",
+  "status": "active",
+  "latestEvaluation": {
+    "evaluatedAt": "2026-04-01T12:00:00.000Z",
+    "wouldTriggerNow": false
+  },
+  "executions": [
+    {
+      "id": "exec_123",
+      "queryId": "q_123",
+      "type": "llm",
+      "status": "failed",
+      "error": {
+        "code": "LLM_ACTION_UPSTREAM_ERROR",
+        "message": "Failed to execute llm action"
+      },
+      "createdAt": "2026-04-01T12:00:01.000Z"
+    }
+  ]
+}
+```
 
-**Webhook signature verification:**
+Use polling for debugging or backfills. For production delivery, prefer webhook or SSE
+notifications. Store `sessionId` values from executions so you can fetch full LLM analysis
+only when needed via `GET /v2/auto/queries/:queryId/sessions/:sessionId`.
+
+#### Notifications — delivery channels
+
+After a query triggers, Auto delivers events via one of three channels:
+
+| Channel | Best for | Setup |
+|---|---|---|
+| **Webhook** | Production agent automation | `action.type = "webhook"` with signature verification + queue/worker |
+| **Telegram** | Fast human-readable alerts | `action.type = "telegram"` (direct) or webhook→bot relay (custom formatting) |
+| **SSE Stream** | Real-time event consumers | `GET /v2/auto/queries/{queryId}/stream` with `x-elfa-api-key` header |
+
+**Query `title` and `description` in notifications:** both fields are embedded in every
+outbound notification (Telegram, webhook, SSE). Recipients often see an alert hours or days
+after the query was set up — these fields are what make it clear **what** fired and **why
+it was set up**. Always set them.
+
+#### Canonical event payload contract
+
+Normalize all incoming events (webhook, Telegram relay, SSE) to this internal shape to keep
+downstream processing consistent:
+
+```json
+{
+  "version": "1.0",
+  "eventType": "query.triggered",
+  "eventId": "evt_01J...",
+  "timestamp": "2026-04-01T12:00:00.000Z",
+  "queryId": "q_123",
+  "channel": "webhook",
+  "trigger": {
+    "symbol": "BTC",
+    "reason": "price > threshold"
+  },
+  "evaluation": { "triggered": true },
+  "action": { "type": "webhook" }
+}
+```
+
+**Webhook request headers** (what your receiver must read):
+
+| Header | Purpose |
+|---|---|
+| `X-Auto-Event-Id` | Unique event ID for deduplication |
+| `X-Auto-Signature-Timestamp` | Unix seconds for replay-window check |
+| `X-Auto-Signature` | `v1=<hex_hmac_sha256>` — verify against raw body |
+
+**SSE frame format:**
+
+```
+event: query.triggered
+id: evt_01J...
+data: {"version":"1.0","eventType":"query.triggered","eventId":"evt_01J...","queryId":"q_123",...}
+```
+
+**Telegram relay job format** (when transforming webhook → Telegram Bot API):
+
+```json
+{
+  "eventId": "evt_01J...",
+  "queryId": "q_123",
+  "channel": "telegram",
+  "chatId": "<CHAT_ID>",
+  "text": "BTC trigger fired: price > threshold",
+  "priority": "high"
+}
+```
+
+#### Webhook signature verification
+
+Signing inputs:
+
+```
+signing_key = SHA256(your_secret)
+expected    = HMAC_SHA256(signing_key, timestamp + "." + eventId + "." + rawBody)
+```
+
+**Node.js verification:**
 
 ```typescript
 import crypto from "crypto";
 
-function verifyAutoWebhook(secret: string, rawBody: string, signatureHeader: string, timestamp: string, eventId: string): boolean {
+export function verifyAutoWebhook(
+  secret: string,
+  rawBody: string,
+  signatureHeader: string,
+  timestamp: string,
+  eventId: string,
+): boolean {
   if (!signatureHeader?.startsWith("v1=")) return false;
   const given = signatureHeader.slice(3);
   const signingKey = crypto.createHash("sha256").update(secret).digest();
@@ -741,20 +1027,326 @@ function verifyAutoWebhook(secret: string, rawBody: string, signatureHeader: str
 }
 ```
 
-Full details: [Notifications](https://docs.elfa.ai/auto/notifications) |
+Operational checklist:
+- Enforce a bounded replay window on `X-Auto-Signature-Timestamp` (reject drift >30s).
+- Deduplicate by `X-Auto-Event-Id` in durable storage.
+- Return `2xx` fast, then process asynchronously (queue + worker).
+
+#### Telegram bot setup (for `action.type: "telegram"` or relay)
+
+1. Open `@BotFather` in Telegram → `/newbot` → save bot token (treat as secret).
+2. Send any message to the bot (or in a group where the bot is present).
+3. `curl "https://api.telegram.org/bot<BOT_TOKEN>/getUpdates"` → read `message.chat.id`.
+4. Send messages via:
+
+```bash
+curl -X POST "https://api.telegram.org/bot<BOT_TOKEN>/sendMessage" \
+  -H "Content-Type: application/json" \
+  -d '{"chat_id": "<CHAT_ID>", "text": "Auto trigger fired for BTC RSI"}'
+```
+
+#### Agent runner — reference architecture
+
+Auto handles query evaluation + event emission. Your runner handles event ingestion,
+verification, deduplication, strategy continuation, and audit logging.
+
+```
+Auto Query
+  → Auto Event Ingress (Webhook / SSE)
+  → Signature Verification + Idempotency
+  → Job Queue
+  → Agent Decision Worker
+  → Action Adapter (Telegram / Internal API / Order Router)
+  → Logs + Metrics + Alerts
+```
+
+**Core processing loop:**
+
+1. Receive event (webhook or SSE frame).
+2. Verify signature (webhook only).
+3. Check idempotency — is `eventId` already processed?
+4. Enqueue job and ACK `2xx` fast.
+5. Worker resolves extra context (poll query, fetch LLM session).
+6. Apply policy, decide next step.
+7. Execute downstream action.
+8. Record result for replay/debug.
+
+**Instruction envelope** — structured contract passed from ingress to worker:
+
+```json
+{
+  "eventId": "evt_123",
+  "queryId": "q_123",
+  "objective": "Handle trigger and decide next action",
+  "allowedActions": ["notify", "fetch_session", "execute_adapter"],
+  "constraints": {
+    "maxExecutionSeconds": 30,
+    "riskMode": "conservative"
+  }
+}
+```
+
+**Minimal TypeScript worker skeleton:**
+
+```typescript
+type AutoJob = { eventId: string; queryId: string; raw: unknown };
+const queue: AutoJob[] = [];
+const processed = new Set<string>();
+
+function onWebhook(eventId: string, queryId: string, raw: unknown) {
+  if (processed.has(eventId)) return; // idempotent
+  queue.push({ eventId, queryId, raw });
+}
+
+async function workerLoop() {
+  while (true) {
+    const job = queue.shift();
+    if (!job) { await new Promise((r) => setTimeout(r, 250)); continue; }
+    // 1) Pull latest query/execution state if needed
+    // 2) Fetch session details for llm actions
+    // 3) Decide next action (policy + agent logic)
+    // 4) Execute action (notify, relay, order adapter)
+    processed.add(job.eventId);
+  }
+}
+```
+
+**Deployment patterns:**
+
+| Pattern | Best for |
+|---|---|
+| Single process (API + worker) | Early-stage prototypes |
+| API + queue + workers | Production reliability at scale |
+| Serverless consumer + queue worker | Spiky workloads with managed ops |
+
+**Local (Docker Compose) stack:**
+
+```yaml
+version: "3.9"
+services:
+  redis: { image: redis:7-alpine, ports: ["6379:6379"] }
+  ingress:
+    build: ./ingress
+    environment:
+      AUTO_SECRET: ${AUTO_SECRET}
+      REDIS_URL: redis://redis:6379
+    depends_on: [redis]
+    ports: ["3000:3000"]
+  worker:
+    build: ./worker
+    environment:
+      AUTO_SECRET: ${AUTO_SECRET}
+      REDIS_URL: redis://redis:6379
+      ELFA_BASE_URL: https://api.elfa.ai/v2/auto
+    depends_on: [redis]
+```
+
+**Minimal environment contract** (same keys local + cloud):
+
+```
+AUTO_SECRET=<event-signing secret>
+ELFA_BASE_URL=https://api.elfa.ai/v2/auto
+QUEUE_URL=<redis/sqs/pubsub endpoint>
+RUNNER_MODE=local|cloud
+```
+
+**Reliability checklist:**
+
+- Store dedupe keys by `eventId` in durable storage
+- Retry policy with dead-letter queue
+- Keep webhook handler fast and non-blocking
+- Log decision input/output for every run
+- Health checks + alerting on worker lag
+
+**Recommended setup by stage:**
+
+| Stage | Pattern |
+|---|---|
+| Prototype | Auto Telegram + local worker |
+| Production | Auto webhook + queue + worker |
+| Real-time operations | Auto SSE + worker service |
+
+Full detail: [Notifications](https://docs.elfa.ai/auto/notifications) |
 [Agent Runner](https://docs.elfa.ai/auto/agent-runner)
+
+#### Notification troubleshooting
+
+| Symptom | Likely Cause | Fix |
+|---|---|---|
+| `400` / `401` when polling or streaming | Missing/invalid API key or auth headers | Send `x-elfa-api-key`; include HMAC headers where required |
+| Webhook signature mismatch | Signing wrong payload (not raw body) or wrong secret | Verify with `timestamp + "." + eventId + "." + rawBody` and `SHA256(secret)` key |
+| Duplicate downstream actions | No idempotency on event processing | Dedupe by `eventId` before enqueue/execute |
+| Event received but agent does nothing | Ingress processes inline and times out | ACK fast, push to queue, process in worker |
+| SSE disconnect/reconnect loops | No retry/backoff or unstable consumer | Add reconnect backoff + heartbeat monitoring |
+| Missing triggers after some time | Query expired or was cancelled | Poll status; check `expiresIn`, `status`, `latestEvaluation` |
+| Signature timestamp rejected | Runner clock skew | Sync clock (NTP); enforce bounded replay window |
+
+#### Validation errors — next action table
+
+When `/v2/auto/queries/validate` (or Create) rejects, the error is almost always a phrasing
+issue, not a capability gap. Iterate on Validate instead of abandoning the query.
+
+| Error signal | What it means | Next action |
+|---|---|---|
+| `EQL_MISSING_ARG` | A required arg is absent (e.g. `period` on `ema`/`sma`) | Add the missing arg from the TA Args Contract, re-validate |
+| `EQL_INVALID_ARG` / type errors | Wrong type (`"14"` instead of `14`) or unrecognized key (`length` vs `period`) | Use exact key names + JSON numeric types |
+| Unknown `method` | Indicator name not supported | Pick nearest supported method; ask Builder Chat to substitute |
+| Unsupported `timeframe` / `period` | Value outside enum | Snap to nearest allowed value |
+| Unsupported `symbol` / source | Asset not indexed or DEX pair unsupported | Skip symbol and report it; proceed with supported subset |
+| Depth / leaf-count exceeded | More than depth 3 or 10 leaves | Split into two queries joined by your runner |
+| `cron` / `llm` period too short | Below 1h minimum | Raise to `1h` or higher |
+| Dynamic value in action params | Dynamic values only allowed in condition `value` | Move dynamic reference into condition; keep action params literal |
+
+Cross-operator semantics: `crosses_above` = previous `<` threshold AND current `>=` threshold.
+`crosses_below` = previous `>` threshold AND current `<=` threshold. Both require previous-state
+tracking server-side.
 
 #### Substitution ladder — if Auto doesn't fit
 
-Before concluding a use case is out of scope, walk this ladder:
+Before concluding a use case is out of scope, walk this ladder. Most intents resolve at
+rung 1 or 2.
 
-1. **Rephrase through Builder Chat** with `"If anything is unsupported, return the closest supported query and list substitutions"`
-2. **Iterate on Validate Query** — loop: validate → reshape → re-validate
-3. **Split into multiple queries** joined by your runner
-4. **Use `source: "llm"`** for fuzzy/narrative predicates
-5. **Report the gap** via `POST /v2/auto/unmet-intent` (or `POST /x402/v2/auto/unmet-intent`) — then pre-compute externally
+1. **Rephrase through Builder Chat** — append `"If anything is unsupported, return the closest supported query and list substitutions"` to your chat prompt.
+2. **Iterate on Validate Query** — loop: validate → reshape → re-validate. Do NOT jump to "this isn't possible" after one rejection.
+3. **Split into multiple queries** joined by your runner (for depth 3 / 10-leaf limits).
+4. **Use `source: "llm"`** with `athena_condition` for fuzzy/narrative predicates.
+5. **Pre-compute in your own service, use Auto as control plane** — only after rungs 1–4 fail.
 
-Do not build your own monitoring stack before walking rungs 1–4.
+**Between rung 4 and rung 5, report the gap via `POST /v2/auto/unmet-intent`** (or
+`POST /x402/v2/auto/unmet-intent`). This does not replace the ladder — it captures the gap
+while you proceed with a fallback.
+
+**Worked example — "alert on descending trendline break":**
+
+- **Rung 1:** Rephrase as a supported proxy — _"alert when BTC price crosses above 4h upper Bollinger Band AND 1h RSI > 55"_.
+- **Rung 4:** If the proxy isn't acceptable, use `source: "llm"` with a scheduled natural-language predicate — _"has BTC broken its recent descending trendline on the 4h chart?"_.
+- **Rung 5:** Only if both fail: compute trendline-break externally, feed a boolean into an Auto `cron` + `llm` query as the condition trigger.
+
+Do not build your own monitoring/evaluation/trigger stack before walking rungs 1–4.
+
+#### Report Unmet Intent — `POST /v2/auto/unmet-intent`
+
+Use when `/auto` can't express your intent after walking the substitution ladder. Calls
+are logged for review. The endpoint always returns a clean acknowledgement so you can
+keep iterating instead of abandoning `/auto`.
+
+**Routes:**
+
+| Mode | Route | Auth | Charge |
+|---|---|---|---|
+| API key | `POST /v2/auto/unmet-intent` | `x-elfa-api-key` | Free |
+| x402 keyless | `POST /x402/v2/auto/unmet-intent` | x402 payment headers | Free (not billed) |
+
+**Request body:**
+
+```typescript
+{
+  category: "symbol"
+          | "indicator"
+          | "data_source"
+          | "operator"
+          | "action_type"
+          | "delivery_integration"
+          | "query_shape"
+          | "other",
+  description: string,              // required, 10–2000 chars
+  attemptedQuery?: object,          // optional, ≤ 16KB serialized
+  nearestSupported?: object,        // optional — helps calibrate gap
+  agentContext?: {
+    agentName?: string,             // e.g. "claude-code"
+    agentVersion?: string,
+    userGoal?: string               // 1-sentence end-user goal
+  }
+}
+```
+
+**Validation rules:**
+- `category` and `description` are required.
+- `attemptedQuery` must not exceed 16KB serialized.
+- Unknown top-level keys are stripped and ignored.
+
+**Field guidance:**
+- `category` — pick the closest match; use `other` only when none fits.
+- `description` — describe the intent, not the error. Example: _"wanted to trigger on a descending-trendline break on BTC 4h"_, not _"validate failed"_.
+- `attemptedQuery` — include the query JSON you tried — most useful field for prioritization.
+- `nearestSupported` — include your fallback if you have one — calibrates gap severity.
+- `agentContext` — agent name/version + 1-sentence user goal help cluster similar requests.
+
+**Response** (always HTTP 200 on successful logging):
+
+```json
+{ "requestId": "550e8400-e29b-41d4-a716-446655440000", "status": "logged" }
+```
+
+Error responses: `400` (validation failure), `401` (auth), `429` (rate limit — retry after
+`Retry-After` header).
+
+**Example:**
+
+```bash
+curl -X POST https://api.elfa.ai/v2/auto/unmet-intent \
+  -H "x-elfa-api-key: $ELFA_API_KEY" \
+  -H "content-type: application/json" \
+  -d '{
+    "category": "indicator",
+    "description": "Wanted to trigger when BTC breaks a descending trendline on 4h. No TA method maps cleanly to trendline-break.",
+    "attemptedQuery": { "title": "BTC trendline break 4h", "conditions": { "AND": [{ "source": "ta", "method": "trendline_break", "args": { "symbol": "BTC", "timeframe": "4h" }, "operator": "==", "value": true }] }, "actions": [{ "stepId": "step_1", "type": "webhook", "params": { "url": "https://your-runner.example/auto/events" } }], "expiresIn": "24h" },
+    "nearestSupported": { "title": "BTC proxy: price crosses 4h upper BBand", "conditions": { "AND": [{ "source": "price", "method": "current", "args": { "symbol": "BTC" }, "operator": "crosses_above", "value": { "source": "ta", "method": "bbands_upper", "args": { "symbol": "BTC", "timeframe": "4h" } } }] }, "actions": [{ "stepId": "step_1", "type": "webhook", "params": { "url": "https://your-runner.example/auto/events" } }], "expiresIn": "24h" },
+    "agentContext": { "agentName": "claude-code", "agentVersion": "0.x", "userGoal": "Alert me to BTC 4h trendline breaks" }
+  }'
+```
+
+Full detail: [Report Unmet Intent](https://docs.elfa.ai/auto/unmet-intent).
+
+#### Query drafts
+
+Drafts let you stage an Auto query without activating it (and without spending credits).
+Useful for human-in-the-loop approval workflows, dashboards where users edit before
+committing, or batch authoring flows.
+
+**Draft lifecycle:**
+
+1. `POST /v2/auto/queries/drafts` — create or update a draft (idempotent upsert).
+2. `GET /v2/auto/queries/drafts` — list editable drafts.
+3. `POST /v2/auto/queries/drafts/:draftId/preview` — validate/preview stored draft.
+4. `POST /v2/auto/queries/drafts/:draftId/convert` — promote draft → active query (**HMAC required**).
+5. `DELETE /v2/auto/queries/drafts/:draftId` — discard draft.
+
+> `GET /v2/auto/queries/drafts/:draftId` still works but is legacy — prefer
+> `GET /v2/auto/queries/{queryId}` which resolves both active queries and drafts.
+
+Drafts are API-key-mode only. Not available via x402.
+
+#### Exchange connections
+
+Required only if you want to use **live trade-execution actions** (beyond `webhook`,
+`notify`, `telegram`, `llm`). Connects your CEX account to Auto so triggered queries can
+place orders on your behalf.
+
+| Endpoint | Method | Auth | Description |
+|---|---|---|---|
+| `/v2/auto/exchanges` | POST | HMAC | Connect an exchange |
+| `/v2/auto/exchanges` | GET | API key | List connected exchanges |
+| `/v2/auto/exchanges/:exchange` | DELETE | HMAC | Disconnect |
+
+Exchange connections are API-key-mode only. Not available via x402. Trade execution is not
+available via x402 at all.
+
+#### Executions
+
+Every trigger fire produces an **execution record** — use these endpoints to audit trigger
+history, debug failed actions, or reconcile with your runner's audit log.
+
+| Endpoint | Method | Description |
+|---|---|---|
+| `/v2/auto/executions` | GET | List execution records (filterable) |
+| `/v2/auto/executions/:executionId` | GET | Get a single execution record |
+
+Execution records are also embedded in the poll response (`GET /v2/auto/queries/:queryId`)
+under the `executions` array, but the dedicated endpoints are useful for cross-query audits
+and pagination.
+
+Executions are API-key-mode only. Not available via x402.
 
 ### Step 4: Generating code snippets
 
