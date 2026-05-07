@@ -9,7 +9,7 @@ Works with **Claude Code**, **OpenCode**, **Cursor**, **GitHub Copilot**, **Code
 ### Any Agent (Recommended)
 
 ```bash
-npx skills add elfa-ai/elfa-ai-skill
+npx skills add elfa-ai/skills
 ```
 
 This uses the [Skills CLI](https://github.com/vercel-labs/skills) to install skills via symlink. Works with Claude Code, Cursor, Windsurf, Codex, and [40+ other agents](https://github.com/vercel-labs/skills#supported-agents). Skills stay up to date — run `npx skills update` to pull the latest.
@@ -17,7 +17,7 @@ This uses the [Skills CLI](https://github.com/vercel-labs/skills) to install ski
 Install globally (available across all projects):
 
 ```bash
-npx skills add elfa-ai/elfa-ai-skill --global
+npx skills add elfa-ai/skills --global
 ```
 
 ### Manual Install
