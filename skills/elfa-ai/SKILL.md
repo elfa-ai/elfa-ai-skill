@@ -132,7 +132,7 @@ _Query lifecycle:_
 | `/v2/auto/queries` | POST | Create and activate a query | Conditional |
 | `/v2/auto/queries` | GET | List queries | API key |
 | `/v2/auto/queries/:queryId` | GET | Poll query status and executions (resolves query or draft) | API key |
-| `/v2/auto/queries/:queryId/cancel` | POST | Cancel an `active` / `recurring` query (returns `409` if status is terminal) | Conditional |
+| `/v2/auto/queries/:queryId/cancel` | POST | Cancel an `active` query (returns `409` if status is terminal) | Conditional |
 | `/v2/auto/queries/:queryId` | DELETE | Delete a terminal query — only when status is `triggered` / `expired` / `cancelled` / `failed` (returns `409` otherwise; active queries must be cancelled first) | Conditional |
 | `/v2/auto/queries/:queryId/stream` | GET | Stream notifications via SSE | API key |
 
@@ -183,11 +183,10 @@ _Other:_
 | `/x402/v2/auto/queries/validate` | POST | Validate EQL and preview cost |
 | `/x402/v2/auto/queries` | POST | Create and activate a query |
 | `/x402/v2/auto/queries/:queryId` | POST | Poll query status (POST, not GET) |
-| `/x402/v2/auto/queries/:queryId/cancel` | POST | Cancel an `active` / `recurring` query |
+| `/x402/v2/auto/queries/:queryId/cancel` | POST | Cancel an `active` query |
 | `/x402/v2/auto/queries/:queryId/stream` | GET | Stream notifications via SSE |
 | `/x402/v2/auto/queries/:queryId/sessions` | POST | List LLM sessions (POST, not GET) |
 | `/x402/v2/auto/queries/:queryId/sessions/:sessionId` | POST | Get LLM session details (POST, not GET) |
-| `/x402/v2/auto/validate-tradable-symbol/:symbol` | GET | Check whether a symbol is tradable as a Hyperliquid perp |
 
 > **Note on x402 Auto scope.** Trade execution actions are not available via x402. Exchange connections, drafts, executions, and the terminal-query DELETE endpoint are API-key-mode only. x402 Auto covers the core monitoring lifecycle (chat, validate, create, poll, cancel, stream, sessions).
 
@@ -369,7 +368,7 @@ For API key lifecycle/cleanup calls, preserve this order when each operation app
 
 1. `POST /v2/auto/queries/validate` — validate EQL and preview cost
 2. `POST /v2/auto/queries` — create and activate
-3. `POST /v2/auto/queries/{queryId}/cancel` — only if stopping an `active` / `recurring` query before it reaches terminal status (returns `409` once terminal)
+3. `POST /v2/auto/queries/{queryId}/cancel` — only if stopping an `active` query before it reaches terminal status (returns `409` once terminal)
 4. `DELETE /v2/auto/queries/{queryId}` — only after status is terminal (`triggered` / `expired` / `cancelled` / `failed`); active queries must be cancelled first
 
 > **Cancel and delete are distinct operations.** `POST /cancel` flips an active query to `cancelled` (terminal). `DELETE` removes the record entirely and only works on terminal queries. Sending `DELETE` on an active query returns `409 Conflict`.
@@ -627,7 +626,7 @@ const response = await x402Fetch(
 4. `POST /v2/auto/queries` — Create and activate
 5. `GET /v2/auto/queries/{queryId}/stream` — Stream notifications (or poll)
 6. `GET /v2/auto/queries/{queryId}/sessions` + `/sessions/{sessionId}` — Fetch LLM output (if using `llm` action)
-7. (Optional cleanup) `POST /v2/auto/queries/{queryId}/cancel` — Cancel only while `active` / `recurring` (returns `409` if already terminal)
+7. (Optional cleanup) `POST /v2/auto/queries/{queryId}/cancel` — Cancel only while `active` (returns `409` if already terminal)
 8. (Optional cleanup) `DELETE /v2/auto/queries/{queryId}` — Delete only after terminal (`triggered` / `expired` / `cancelled` / `failed`); rejects active queries with `409`
 
 **x402 mode (`/x402/v2/auto/*`):**
@@ -637,7 +636,7 @@ const response = await x402Fetch(
 3. `POST /x402/v2/auto/queries` — Create and activate
 4. `GET /x402/v2/auto/queries/{queryId}/stream` — Stream notifications (or poll via POST)
 5. `POST /x402/v2/auto/queries/{queryId}/sessions` + `/sessions/{sessionId}` — Fetch LLM output
-6. (Optional cleanup) `POST /x402/v2/auto/queries/{queryId}/cancel` — Cancel only while `active` / `recurring`. (x402 has no terminal-delete endpoint.)
+6. (Optional cleanup) `POST /x402/v2/auto/queries/{queryId}/cancel` — Cancel only while `active`. (x402 has no terminal-delete endpoint.)
 
 **Always validate before create.** Validate returns structured errors you can iterate on
 without spending credits.
@@ -890,6 +889,7 @@ A query contains `conditions`, `actions`, and `expiresIn`:
 
 **TA critical rules:**
 - `ema` and `sma` **require** `period` — it is NOT optional
+- `rsi`, `bbands_*`, `atr`, `cci`, and `willr` accept optional `period` with documented defaults above
 - `period` must be a JSON number (`14`), not a string (`"14"`)
 - Use `period` not `length` — `length` is not a recognized alias
 - `timeframe` values: `1m`, `5m`, `15m`, `30m`, `1h`, `2h`, `4h`, `8h`, `12h`, `1d`
@@ -920,19 +920,16 @@ Rules:
 - `username` must be passed **without** `@` (e.g. `cz_binance`, not `@cz_binance`).
 - `username` must resolve to an active monitored account at create-time, otherwise validation/create fails.
 - `minConfidence` must be a JSON integer between `0` and `100`; use `80` when the user gives no threshold.
-- Default operator/value: `"==", true` — the condition is true when semantic match passes the threshold.
+- `method`, `operator`, and `value` are auto-filled defaults (`semantic`, `==`, `true`) — do **not** include them in the condition JSON.
 
 ```json
 {
   "source": "tweet",
-  "method": "semantic",
   "args": {
     "username": "cz_binance",
     "text": "Binance Alpha is listing a new token",
     "minConfidence": 80
-  },
-  "operator": "==",
-  "value": true
+  }
 }
 ```
 
@@ -946,19 +943,16 @@ In the Builder Chat catalog this is the `Signal` category, **Event**.
 
 Rules:
 - `minConfidence` must be a JSON integer between `0` and `100`; use `80` when the user gives no threshold.
-- Default operator/value: `"==", true`.
+- `method`, `operator`, and `value` are auto-filled defaults — do **not** include them.
 - Use `news` for world events not anchored to a specific account; use `tweet` when the trigger is anchored to a specific handle.
 
 ```json
 {
   "source": "news",
-  "method": "semantic",
   "args": {
     "text": "SEC approves a spot ETH ETF",
     "minConfidence": 80
-  },
-  "operator": "==",
-  "value": true
+  }
 }
 ```
 
@@ -1044,7 +1038,15 @@ Additional constraints:
   "title": "BTC > 100k — LLM review",
   "description": "On BTC breakout, run LLM to decide next trading action.",
   "conditions": { "AND": [{ "source": "price", "method": "current", "args": { "symbol": "BTC" }, "operator": ">", "value": 100000 }] },
-  "actions": [{ "stepId": "step_1", "type": "llm", "params": { "objective": "Analyze trigger context and return next action" } }],
+  "actions": [{
+    "stepId": "step_1",
+    "type": "llm",
+    "params": {
+      "action": "summary",
+      "speed": "expert",
+      "callback": { "action": { "type": "webhook", "params": { "url": "https://your-runner.example/auto/events" } } }
+    }
+  }],
   "expiresIn": "24h"
 }
 ```
@@ -1091,7 +1093,15 @@ Additional constraints:
   "title": "Every 4h: portfolio sweep",
   "description": "Recurring LLM pass every 4h.",
   "conditions": { "AND": [{ "source": "cron", "method": "every", "args": { "period": "4h" }, "operator": "==", "value": true }] },
-  "actions": [{ "stepId": "step_1", "type": "llm", "params": { "objective": "Summarize BTC/ETH/SOL context and flag risk shifts" } }],
+  "actions": [{
+    "stepId": "step_1",
+    "type": "llm",
+    "params": {
+      "action": "summary",
+      "speed": "fast",
+      "callback": { "action": { "type": "notify", "params": { "message": "Portfolio sweep LLM summary is ready" } } }
+    }
+  }],
   "expiresIn": "3d"
 }
 ```
@@ -1123,14 +1133,11 @@ Additional constraints:
   "conditions": {
     "AND": [{
       "source": "tweet",
-      "method": "semantic",
       "args": {
         "username": "cz_binance",
         "text": "Binance Alpha is listing a new token",
         "minConfidence": 80
-      },
-      "operator": "==",
-      "value": true
+      }
     }]
   },
   "actions": [{ "stepId": "step_1", "type": "webhook", "params": { "url": "https://your-runner.example/auto/events" } }],
@@ -1147,13 +1154,10 @@ Additional constraints:
   "conditions": {
     "AND": [{
       "source": "news",
-      "method": "semantic",
       "args": {
         "text": "SEC approves a spot ETH ETF",
         "minConfidence": 80
-      },
-      "operator": "==",
-      "value": true
+      }
     }]
   },
   "actions": [{ "stepId": "step_1", "type": "notify", "params": { "message": "Event trigger fired: spot ETH ETF approval signal" } }],

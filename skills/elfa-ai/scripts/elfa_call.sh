@@ -74,7 +74,7 @@ Auto endpoint HMAC signing:
     POST   /v2/auto/queries/drafts/{draftId}/convert     (draft → active query)
 
   Cancel and delete are distinct operations:
-    - POST /cancel: only on active/recurring queries (returns 409 if terminal)
+    - POST /cancel: only on active queries (returns 409 if terminal)
     - DELETE: only on terminal queries — triggered/expired/cancelled/failed
       (returns 409 if active; you must cancel first)
 

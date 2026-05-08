@@ -175,7 +175,7 @@ Help me build a multi-condition trigger for BTC + ETH breakout confirmation
 | `/v2/auto/queries/preview` | Preview a query without creating it |
 | `/v2/auto/queries` | Create and list Auto queries |
 | `/v2/auto/queries/:queryId` | Poll query status (GET) |
-| `/v2/auto/queries/:queryId/cancel` | Cancel an `active` / `recurring` query (POST) |
+| `/v2/auto/queries/:queryId/cancel` | Cancel an `active` query (POST) |
 | `/v2/auto/queries/:queryId` | Delete a terminal query (DELETE — `triggered` / `expired` / `cancelled` / `failed` only) |
 | `/v2/auto/queries/:queryId/stream` | Stream notifications via SSE |
 | `/v2/auto/queries/:queryId/sessions` | List/get LLM analysis sessions |
