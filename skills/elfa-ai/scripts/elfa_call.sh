@@ -261,6 +261,9 @@ if [[ -n "$BODY" ]]; then
   CURL_ARGS+=(-H "Content-Type: application/json" -d "$BODY")
 fi
 
+# x402 Auto never uses API-key HMAC; it uses payment headers + x-elfa-agent-secret.
+[[ "$X402" == true ]] && HMAC_BEHAVIOR="none"
+
 # HMAC signing for Auto endpoints (tri-state — see HMAC_BEHAVIOR comment above)
 SHOULD_SIGN=false
 case "$HMAC_BEHAVIOR" in

@@ -660,7 +660,7 @@ GET  /v2/auto/queries/{queryId}/sessions/{sessionId} → fetch full analysis
 
 _Webhook-based LLM flow:_
 ```
-POST /v2/auto/queries                               → create with action.type = "llm" + callback webhook
+POST /v2/auto/queries                               → create with action.type = "llm" and params.objective
 (wait for webhook)                                  → receive session reference / output
 (optional) GET session fetch                        → /v2/auto/queries/{queryId}/sessions/{sessionId}
 ```
@@ -842,7 +842,7 @@ A query contains `conditions`, `actions`, and `expiresIn`:
 
 **Allowed `expiresIn` values:** `1h`, `2h`, `4h`, `8h`, `12h`, `24h`, `2d`, `3d`, `5d`, `7d`
 
-**Allowed action types:** `webhook`, `notify`, `telegram_bot`, `llm`, `market_order`, `limit_order`. The `actions` array is **exactly one step** per query — chain follow-up work via `llm` action with `params.callback.action`, or have your runner fan out from the trigger event.
+**Allowed action types:** `webhook`, `notify`, `telegram_bot`, `llm`, `market_order`, `limit_order`. The `actions` array is **exactly one step** per query — run standalone LLM work with `params.objective`; chain follow-up work via `llm` action with `params.callback.action`, or have your runner fan out from the trigger event.
 
 **Action params shape (key fields):**
 
@@ -852,7 +852,7 @@ A query contains `conditions`, `actions`, and `expiresIn`:
 | `webhook` | `url` (https only, allowlisted host) | `allNotifications` (default `false`) |
 | `telegram_bot` | `botToken`, `chatId` | `allNotifications` (default `false`) |
 | `market_order` / `limit_order` | `exchange`, `symbol`, `side`, and `size` XOR `amount` (+ `price` for limit) | `reduceOnly`, `leverage`, `tp`, `sl` |
-| `llm` | `action` (chat / summary / macro / accountAnalysis / tokenDiscovery / tokenAnalysis), `callback.action` | `speed` (`fast` / `expert`), per-action extras |
+| `llm` | `objective` for standalone LLM work, or `action` + `callback.action` for chained follow-up | `speed` (`fast` / `expert`), per-action extras |
 
 `telegram_bot` does **not** take a `message` field — the message body is auto-composed from the query `title` + `description` + trigger context. Use `notify` (in-app push) when you want to specify the message text yourself. `allNotifications: true` on `webhook` / `telegram_bot` opts the destination into lifecycle notifications (failed/expired/run-failed) in addition to the trigger fire.
 
@@ -1041,11 +1041,7 @@ Additional constraints:
   "actions": [{
     "stepId": "step_1",
     "type": "llm",
-    "params": {
-      "action": "summary",
-      "speed": "expert",
-      "callback": { "action": { "type": "webhook", "params": { "url": "https://your-runner.example/auto/events" } } }
-    }
+    "params": { "objective": "Analyze trigger context and return next action" }
   }],
   "expiresIn": "24h"
 }
@@ -1096,11 +1092,7 @@ Additional constraints:
   "actions": [{
     "stepId": "step_1",
     "type": "llm",
-    "params": {
-      "action": "summary",
-      "speed": "fast",
-      "callback": { "action": { "type": "notify", "params": { "message": "Portfolio sweep LLM summary is ready" } } }
-    }
+    "params": { "objective": "Summarize BTC/ETH/SOL context and flag any risk shifts" }
   }],
   "expiresIn": "3d"
 }
