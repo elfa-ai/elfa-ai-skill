@@ -240,7 +240,7 @@ Specifics, defaults, and constraints are in `references/strategy-authoring.md`.
 
 ## Things to never do
 
-- **Never use em-dashes** in chat output, code, commits, alerts, or any external API content. Replace with parentheses, colons, commas, or hyphens. (Historical context: em-dashes in HMAC-signed Elfa bodies once caused signature failures; even though HMAC is gone, the no-em-dash convention sticks for the project as a whole.)
+- **Never use em-dashes** in chat output, code, commits, alerts, or any external API content. Replace with parentheses, colons, commas, or hyphens. Project-wide convention for ASCII-only output.
 - **Never ask Elfa Auto to execute trades directly.** The only allowed action types in queries this project creates are `webhook` (and only the webhook action targeting our receiver). Never use `/v2/auto/exchanges`, never use `market_order` or `limit_order` action types, never add `telegram` actions on the Auto side (the receiver sends Telegram itself).
 - **Never set up `I_UNDERSTAND_REAL_MONEY=yes` or any equivalent gate.** This project is prod-only. The safety layer is the explicit per-strategy "yes" in chat before activation, and the per-strategy `max_notional_usd` cap.
 - **Never rely on session memory for live position state.** Before reporting positions, balance, or open orders, poll GRVT live (`fetch_positions`, `fetch_balance`, `fetch_open_orders`). Local registry holds strategy metadata only.

@@ -184,4 +184,4 @@ Always validate before creating. The bot's `ElfaClient.validate_query()` method 
 
 ## Convention: keep query content ASCII-only
 
-Use only ASCII characters in `title`, `description`, and any other free text in the query body. Replace em-dashes (U+2014) with parens, hyphens, colons, or commas. (This is a project-wide convention. Historically em-dashes in HMAC-signed Elfa bodies failed signature checks; HMAC is gone but the no-em-dash rule persists for stylistic consistency.)
+Use only ASCII characters in `title`, `description`, and any other free text in the query body. Replace em-dashes (U+2014) with parens, hyphens, colons, or commas. Project-wide convention for ASCII-only output.

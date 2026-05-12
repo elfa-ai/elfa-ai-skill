@@ -83,6 +83,33 @@ If you opt in, you need:
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_CHAT_ID`
 
+#### Optional: wire `show_pending_alerts.sh` for hook-driven alerts
+
+The bundled `scripts/show_pending_alerts.sh` prints any unacked alerts on stdout (and auto-acks them after printing). Agents that support session-start, pre-prompt, or shell hooks can call this script so alerts surface automatically without the agent having to remember `AGENTS.md`.
+
+Examples:
+
+- **Claude Code** — drop `.claude/settings.json` in the project root:
+  ```json
+  {
+    "hooks": {
+      "UserPromptSubmit": [
+        {
+          "hooks": [
+            {
+              "type": "command",
+              "command": "bash $CLAUDE_PROJECT_DIR/scripts/show_pending_alerts.sh"
+            }
+          ]
+        }
+      ]
+    }
+  }
+  ```
+- **Other agents** — point your session-start or pre-prompt hook at `<project>/scripts/show_pending_alerts.sh`. The script self-locates its project root, reads `.env`, and exits silently if there is nothing to surface.
+
+The `AGENTS.md` instruction (poll on every session start) remains the agent-neutral baseline; the hook above is a faster, turn-driven alternative for clients that support it.
+
 ### 6. Populate `.env`
 
 ```bash

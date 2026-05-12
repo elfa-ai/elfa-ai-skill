@@ -127,4 +127,4 @@ The bot's `_gen_nonce` returns `random.randint(0, 2**32 - 1)`. The `client_order
 
 ## ASCII-only content (project convention)
 
-Em-dashes (U+2014) and other non-ASCII characters are banned project-wide in chat, code, commits, alerts, and API request bodies. Historically, em-dashes in HMAC-signed Elfa bodies caused signature failures; HMAC has since been removed, but the convention sticks for stylistic consistency. Use hyphens, parens, colons, or commas instead.
+Em-dashes (U+2014) and other non-ASCII characters are banned project-wide in chat, code, commits, alerts, and API request bodies. Use hyphens, parens, colons, or commas instead. Project-wide convention for ASCII-only output.

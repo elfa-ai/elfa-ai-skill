@@ -91,7 +91,7 @@ If the user wants wait-for-flat semantics ("don't fire if I already have a posit
 
 These are non-negotiable for this project:
 
-- **No em-dashes** (U+2014) anywhere: chat, code, commits, alert text, API request bodies. Replace with hyphens, parens, colons, or commas. (Project-wide convention; originated from past HMAC body-signing failures and kept for stylistic consistency even after HMAC was removed.)
+- **No em-dashes** (U+2014) anywhere: chat, code, commits, alert text, API request bodies. Replace with hyphens, parens, colons, or commas. Project-wide convention for ASCII-only output.
 
 - **One webhook action per query.** Never add `telegram`, `notify`, `llm`, or any other action type. The receiver is the sole owner of order placement and Telegram messaging.
 

@@ -26,7 +26,7 @@ Elfa supports API-key auth and x402 keyless payments. API keys are optional when
 | Variable | Required | Use |
 |---|---:|---|
 | `ELFA_API_KEY` | No | API-key authenticated requests. Get a free key at <https://go.elfa.ai/claude-skills>. |
-| `ELFA_HMAC_SECRET` | No | HMAC secret for Auto trade-action mutations (`market_order`, `limit_order`, or `llm` callbacks to those) and exchange linking. Notification-only mutations (`notify`, `telegram_bot`, `webhook`, or `llm` callbacks to those) skip HMAC. Always-signing remains safe. |
+| `ELFA_HMAC_SECRET` | No | HMAC secret for Auto trade-action mutations (`market_order`, `limit_order`, or `llm` callbacks to those) and exchange linking. Notification-only mutations (`notify`, `telegram_bot`, `webhook`, or `llm` callbacks to those) accept unsigned requests today; the HMAC requirement on trade actions reflects current documented policy and is subject to change. Always-signing remains compatible if you prefer to avoid edge cases. |
 | `ELFA_AGENT_SECRET` | No | Persistent agent identity secret for x402 Auto. Generate once with `openssl rand -hex 32` and reuse for query lifecycle calls. |
 
 x402 wallet signing is handled client-side by `@x402/fetch` or `@x402/axios`.
