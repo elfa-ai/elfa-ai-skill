@@ -1,6 +1,8 @@
 # Elfa EQL reference
 
-EQL (Elfa Query Language) is the JSON DSL inside the `query` field of a `POST /v2/auto/queries` body. The bot creates EQL programmatically when authoring a strategy.
+EQL (Elfa Query Language) is the JSON DSL inside the `query` field of a `POST /v2/auto/queries` body.
+
+**The agent does not author or hand-edit EQL.** Builder Chat (`POST /v2/auto/chat`) is the only authority: it produces the `conditions` and `actions` blocks from the user's natural-language prompt, and the bot passes Builder Chat's response through to `POST /v2/auto/queries` unchanged. This file is a reference for *understanding* what Builder Chat returned — explaining operators to the user, sanity-checking that the EQL matches user intent before showing the plan, answering "what does this condition mean?" — not a spec to write against. If Builder Chat's output is wrong, re-prompt with a clearer description rather than editing the JSON.
 
 ## Skeleton
 
@@ -13,8 +15,8 @@ EQL (Elfa Query Language) is the JSON DSL inside the `query` field of a `POST /v
     "actions": [
       {
         "stepId": "step_1",
-        "type": "webhook",
-        "params": { "url": "<RECEIVER_PUBLIC_URL>/auto/events" }
+        "type": "notify",
+        "params": { "channel": "telegram" }
       }
     ],
     "expiresIn": "24h"
@@ -22,7 +24,7 @@ EQL (Elfa Query Language) is the JSON DSL inside the `query` field of a `POST /v
 }
 ```
 
-This project's strict policy: every Auto query has EXACTLY ONE action, a `webhook` to our receiver. Telegram is sent by the receiver, not by Auto. See `references/strategy-authoring.md` for why.
+The bot does not read the `actions` block; it consumes triggers via SSE (`GET /v2/auto/queries/:id/stream`). Whatever actions Builder Chat returns flow through unchanged to `POST /v2/auto/queries`. Telegram is still sent by the receiver (not by Auto) when configured.
 
 ## Top-level rules
 
@@ -30,7 +32,7 @@ This project's strict policy: every Auto query has EXACTLY ONE action, a `webhoo
 - Nest groups up to depth 3.
 - Maximum 10 leaf conditions total.
 - `expiresIn`: one of `1h`, `2h`, `4h`, `8h`, `12h`, `24h`, `2d`, `3d`, `5d`, `7d`. Default 24h.
-- `actions`: chainable but for this project always exactly one webhook entry.
+- `actions`: chainable; the bot does not read this field. Builder Chat fills it based on the user prompt framing; passthrough is fine.
 
 ## Condition sources
 
@@ -136,8 +138,8 @@ Useful for "ETH crosses above its 4h Bollinger upper band" without hardcoding th
         "args": { "symbol": "BTC", "timeframe": "1h", "period": 14 },
         "operator": "crosses_below", "value": 30 }
     ]},
-    "actions": [{ "stepId": "step_1", "type": "webhook",
-      "params": { "url": "https://your-tunnel.trycloudflare.com/auto/events" }}],
+    "actions": [{ "stepId": "step_1", "type": "notify",
+      "params": { "channel": "telegram" }}],
     "expiresIn": "24h"
   }
 }

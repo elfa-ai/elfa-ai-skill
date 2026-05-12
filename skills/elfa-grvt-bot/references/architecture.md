@@ -26,26 +26,29 @@ High-level design of the elfa-grvt-bot.
 │  (registry.db)              │   shared by agent session + receiver
 └──────────────┬──────────────┘
                │
-   ┌───────────▼─────────────────────────────────┐
-   │  ELFA AUTO (managed condition engine)        │
-   │  evaluates conditions; on fire:              │
-   │  POSTs webhook to <RECEIVER_PUBLIC_URL>      │
-   └───┬─────────────────────────────────────────┘
-       │
+   ┌───────────▼──────────────────────────────────────────┐
+   │  ELFA AUTO (managed condition engine)                 │
+   │  evaluates conditions; exposes per-query SSE stream   │
+   │  GET /v2/auto/queries/:id/stream  (notification fire) │
+   │  GET /v2/auto/queries/:id         (REST backfill)     │
+   └───┬──────────────────────────────────────────────────┘
+       │  outbound pull (SSE + REST)
        ▼
-┌─────────────────────────────────────────┐
-│  RECEIVER (always-on FastAPI)           │
-│  1. dedupe by event_id (unsigned in)    │
-│  2. lookup strategy in registry         │
-│  3. silent status check                 │
-│  4. spawn Telegram alert in background  │
-│  5. fetch_mid_price                     │
-│  6. guardrails (env, notional cap)      │
-│  7. set_leverage (best-effort)          │
-│  8. POST full/v2/bulk_orders OTOCO      │
-│     (parent + TP + SL atomic)           │
-│  9. emit success or error alert         │
-└──────────────┬──────────────────────────┘
+┌────────────────────────────────────────────────┐
+│  RECEIVER (always-on outbound consumer)        │
+│  supervisor: polls registry every ~5s,         │
+│  spawns one async SSE task per active strategy │
+│  1. dedupe by executionId (INSERT OR IGNORE)   │
+│  2. lookup strategy in registry                │
+│  3. silent status check                        │
+│  4. spawn Telegram alert in background         │
+│  5. fetch_mid_price                            │
+│  6. guardrails (env, notional cap)             │
+│  7. set_leverage (best-effort)                 │
+│  8. POST full/v2/bulk_orders OTOCO             │
+│     (parent + TP + SL atomic)                  │
+│  9. emit success or error alert                │
+└──────────────┬─────────────────────────────────┘
                ▼
 ┌─────────────────────────────┐    ┌────────────────────┐
 │  GRVT (default: prod)       │    │  Telegram chat     │
@@ -61,26 +64,27 @@ High-level design of the elfa-grvt-bot.
 | `guardrails.py` | Pure-function checks (notional cap, env match, status). Symbol existence is delegated to GRVT (fetch_mid_price/order placement). |
 | `telegram_sender.py` | Bot API send; never raises (only constructed when TELEGRAM_* are configured) |
 | `alerts.py` | AlertWriter: registry insert (always) plus Telegram push (when configured) |
-| `elfa_client.py` | Thin client over `/v2/auto/*`: builder_chat, validate, create, cancel (API-key auth) |
+| `elfa_client.py` | Thin client over `/v2/auto/*`: builder_chat, validate, create, cancel (API-key auth); `get_query` for REST backfill; `stream_query` async SSE consumer |
 | `grvt_executor.py` | High-level GRVT operations; wraps GrvtCcxt + trigger client |
 | `grvt_trigger_client.py` | Raw API for trigger orders + bulk_orders (OTOCO/OCO/OTO) |
-| `receiver.py` | FastAPI app: webhook endpoint + background processing |
-| `__main__.py` | Production entrypoint (wires real clients, runs uvicorn) |
+| `receiver.py` | `supervisor` + per-strategy `_strategy_loop` (SSE consumer + backfill) + `_process_fire` fire handler |
+| `__main__.py` | Production entrypoint: wires real clients, traps SIGINT/SIGTERM, runs `asyncio.run(supervisor(...))` |
 | `registry_cli.py` (top-level src) | CLI for add/list/cancel/alerts/ack |
 
 ## Data flow on a fire
 
 1. Auto evaluates condition; transitions to true.
-2. Auto POSTs webhook to `<RECEIVER_PUBLIC_URL>/auto/events` with headers `X-Auto-Event-Id` (required, dedupe key) and `X-Auto-Timestamp` (informational). Delivery is unsigned.
-3. Receiver checks for `X-Auto-Event-Id` and returns 200 within 1 second.
-4. Background task in the same process:
-   - INSERT into `fires` with `outcome='pending'` (idempotent on `event_id` PK).
-   - SELECT strategy by `query_id`. If missing, alert `unknown_strategy`, return.
-   - If `strategy.status != 'active'`, log silently and return (suppresses retry-spam).
-   - Spawn daemon thread to send `trigger_received` Telegram (non-blocking).
+2. Two paths deliver the notification — whichever arrives first wins; the other is a no-op:
+   - **Live SSE**: the per-strategy task receives `event: notification\ndata: <json>\n\n` on the open stream. The JSON carries `executionId` (dedupe key), `queryId`, and trigger metadata. After emitting the notification the stream closes.
+   - **REST backfill**: on supervisor startup and after each SSE disconnect, `elfa.get_query(query_id)` fetches current state. Any `executions[i].id` not yet in the local `fires` table is replayed through the same fire handler.
+3. Fire handler (`_process_fire`) runs — identical business logic regardless of delivery path:
+   - INSERT OR IGNORE into `fires` keyed by `executionId`. Duplicate → no-op, return early.
+   - SELECT strategy by `query_id`. If missing, alert `unknown_strategy`, bail.
+   - If `strategy.status != 'active'`, log silently and bail (suppresses duplicate-fire noise).
+   - Spawn daemon thread to send `trigger_received` Telegram alert (non-blocking).
    - Fetch `current_mid` via `executor.fetch_mid_price`.
    - Run guardrails (`check_guardrails`).
-   - If `strategy.leverage` is set, call `executor.set_leverage` (best-effort; deprecated API is logged-only).
+   - If `strategy.leverage` is set, call `executor.set_leverage` (best-effort).
    - Call `executor.place_entry_with_tpsl(...)`. Internally:
      - Compute TP/SL absolute prices from current_mid + percentages.
      - Round to instrument tick_size.
@@ -103,15 +107,17 @@ High-level design of the elfa-grvt-bot.
                   (POST /v2/auto/queries/:id/cancel)
 ```
 
+A fire is detected either by the live SSE notification or by the REST backfill diff — both paths run through the same handler. When a strategy enters a terminal status the supervisor cancels its SSE task on the next reconcile cycle.
+
 Single-fire by design. To re-arm a strategy, create a new one.
 
 ## Notification channels
 
-The receiver is the sole emitter of alerts. Every alert is first written to the SQLite `alerts` table (the source of truth), then optionally pushed to Telegram if both `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set. Auto queries created by this project use ONLY a `webhook` action — never a `telegram` action — to keep the narrative single-source.
+The receiver is the sole emitter of alerts. Every alert is first written to the SQLite `alerts` table (the source of truth), then optionally pushed to Telegram if both `TELEGRAM_BOT_TOKEN` and `TELEGRAM_CHAT_ID` are set. The receiver consumes SSE on the query id directly; it does not depend on any notification actions Builder Chat may have embedded in the query definition.
 
 The three alerts a normal fire produces:
 
-1. `trigger_received` (background thread): immediately on accepted webhook, before order placement
+1. `trigger_received` (background thread): immediately on accepted notification, before order placement
 2. `order_placed`: after successful entry submission
 3. `tpsl_armed`: after TP and SL are confirmed (or `manual_intervention_required` if either failed)
 
@@ -124,7 +130,7 @@ This dual design means the user always gets alerts in chat (free, no extra crede
 
 ## Idempotency
 
-`event_id` is the PK of `fires`. INSERT OR IGNORE means a duplicate webhook delivery (Auto retry) becomes a no-op insert; the receiver returns early without re-firing. At-least-once webhook delivery becomes exactly-once order placement.
+`executionId` is the PK of `fires`. INSERT OR IGNORE means a duplicate notification — whether from a live SSE re-delivery or a backfill pass that sees the same execution twice across restarts — becomes a no-op insert and the handler returns early. At-least-once delivery (from either channel) becomes exactly-once order placement.
 
 ## Real-money safety primitives
 
@@ -150,4 +156,4 @@ These are explicit YAGNI cuts in the spec:
 - Multi-user / multi-account support
 - Wait-for-flat semantics
 
-Each can be added later without changing the wire protocol or core architecture.
+Each can be added later without changing the core architecture.

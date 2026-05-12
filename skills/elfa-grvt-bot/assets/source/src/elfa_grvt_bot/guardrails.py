@@ -29,7 +29,7 @@ def check_guardrails(
     # Symbol existence is GRVT's responsibility, not ours: a strategy with an
     # unsupported symbol will fail at fetch_mid_price or order placement and
     # surface as a grvt_other / grvt_error alert. Authoring-time validation
-    # (the agent verifying the symbol via fetch_market before creating the
+    # (Claude verifying the symbol via fetch_market before creating the
     # strategy) is the user-facing safeguard. We don't second-guess GRVT
     # here.
     if strategy.status != "active":

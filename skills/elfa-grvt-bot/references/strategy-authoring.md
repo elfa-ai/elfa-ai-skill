@@ -26,11 +26,13 @@ If there are no pending alerts, say nothing about alerts and continue.
 
 ## When the user describes a strategy
 
-1. **Forward the description to Elfa Builder Chat** (`POST /v2/auto/chat`) with the user's natural-language prompt. API-key auth (`x-elfa-api-key` header). Builder Chat returns a draft query containing both conditions and an actions block.
+1. **Forward the description to Elfa Builder Chat** (`POST /v2/auto/chat`) with the user's natural-language prompt. API-key auth (`x-elfa-api-key` header).
 
-   **Use ONLY the `conditions` block.** Builder Chat does not know about this project's webhook-only rule and routinely returns `market_order`, `limit_order`, or `telegram` actions, which violate the strict rules below. **Discard the `actions` block in its entirety.** You will splice our own webhook action in step 5a.
+   Before calling Builder Chat, prepend `Notify me when:` to the user's description unless the description is already framed as a notification request (e.g. it already starts with "notify me", "alert me", "tell me when", etc.). This is non-negotiable: the Elfa-side action must be `notify` (or another notify-style action), never an execute / trade action. Do not double-wrap if the user's description is already framed that way.
 
-   If Builder Chat returns conditions that don't match what the user asked for (wrong operator, missing leg of an AND, wrong timeframe), edit them by hand using `references/elfa-eql.md` as the spec. Builder Chat is fluent on common indicators (RSI, MACD, stochastic, price) but can be wrong on multi-source ANDs or LLM conditions.
+   Builder Chat returns a draft query with `conditions` and `actions`. **Pass the response through unchanged.** Do not strip or replace the actions block. The receiver consumes triggers via SSE on the query id, not via the actions block, so the actions content is irrelevant to the bot's execution path.
+
+   **Never hand-write or hand-edit the `conditions` block.** Builder Chat is the only authority for EQL. If its conditions don't match the user's intent (wrong operator, missing leg of an AND, wrong timeframe, etc.), re-prompt Builder Chat with a clearer description or ask the user to rephrase; do not edit the JSON yourself. `references/elfa-eql.md` documents the syntax for understanding what Builder Chat returned, not as a spec for you to write against.
 
 2. **Ask the user for any GRVT order params they did not volunteer**:
    - Symbol on GRVT (e.g. `SOL_USDT_Perp`). Before continuing, verify the symbol exists by calling `GrvtCcxt.fetch_market(symbol)` from the grvt-trading skill. If it raises or returns nothing, tell the user "GRVT doesn't have that token" and stop. There is no static allowlist; GRVT itself is the source of truth.
@@ -47,16 +49,17 @@ If there are no pending alerts, say nothing about alerts and continue.
 4. **Show the user the full plan**:
    - The EQL conditions
    - The order spec (side, size, symbol, type, leverage)
-   - Cap, env, expiry, webhook target
+   - Cap, env, expiry
    - Whether `wouldTriggerNow` is true (if so, flag that it will fire immediately)
    - For LLM strategies: the estimated credits
 
    Wait for an explicit "yes".
 
 5. **On approval**:
-   a. `POST /v2/auto/queries`. Construct the body yourself: take the `conditions` block from step 1 (Builder Chat's output, optionally hand-edited) and pair it with EXACTLY ONE action — a `webhook` action with `params.url=<RECEIVER_PUBLIC_URL>/auto/events`. Whatever actions Builder Chat returned in step 1 are discarded. Do NOT add a `telegram` action on the Auto side; the receiver sends Telegram itself. Default `expiresIn` is `24h` unless the user requested otherwise.
+   a. `POST /v2/auto/queries` with the validated body unchanged. Default `expiresIn` is `24h` unless the user requested otherwise.
    b. `python src/registry_cli.py add ...` with all the strategy params. The CLI inserts a row keyed by `query_id`.
    c. Confirm to the user with `query_id`, status `active`, and expiry.
+   d. The receiver's supervisor polls the registry every ~5s and will open an SSE stream for the new query automatically. If the receiver is not running, the user needs to start it (`python -m elfa_grvt_bot`).
 
 ## Defaults this project uses
 
@@ -67,7 +70,7 @@ If there are no pending alerts, say nothing about alerts and continue.
 | Time-in-force | `GOOD_TILL_TIME` |
 | `tp_pct` / `sl_pct` | None (no OTOCO bracket) unless user provides |
 | Max notional cap | (no default; ALWAYS ask user explicitly) |
-| Action | webhook only, target = `<RECEIVER_PUBLIC_URL>/auto/events` |
+| Actions | passthrough - whatever Builder Chat returns; not read by the bot |
 
 ## Operator selection
 
@@ -93,9 +96,11 @@ These are non-negotiable for this project:
 
 - **No em-dashes** (U+2014) anywhere: chat, code, commits, alert text, API request bodies. Replace with hyphens, parens, colons, or commas. Project-wide convention for ASCII-only output.
 
-- **One webhook action per query.** Never add `telegram`, `notify`, `llm`, or any other action type. The receiver is the sole owner of order placement and Telegram messaging.
+- **Never author or hand-edit EQL.** Builder Chat is the only authority. If its output is wrong, re-prompt with a clearer description; do not patch the JSON. `references/elfa-eql.md` is a reference for understanding Builder Chat's output, not a spec to write against.
 
-- **Never use `/v2/auto/exchanges`** or any exchange-execution action type. Order placement happens in our receiver via `grvt-pysdk`, full stop. Auto's role is conditions only.
+- **Don't manipulate Builder Chat's actions block.** Pass it through unchanged. The receiver consumes triggers via SSE on the query id, not via the actions block.
+
+- **Elfa-side action must always be notify-style** (`notify`, `telegram_bot`, etc.). Always prepend `Notify me when:` to the user's description before calling Builder Chat. Never use `/v2/auto/exchanges` or any exchange-execution action type. Order placement happens in our receiver via `grvt-pysdk`, full stop. Auto's role is conditions plus notification only.
 
 - **`GRVT_ENV` is locked to `prod`** for this project. The receiver's `Config` rejects any other value at boot. Do NOT add `I_UNDERSTAND_REAL_MONEY=yes` or any equivalent gate. The safety layer is the explicit per-strategy "yes" in chat.
 
@@ -123,6 +128,7 @@ This calls Elfa `POST /v2/auto/queries/:id/cancel` and updates the local registr
 
 - Don't place orders directly via the grvt-trading skill from the chat session. The receiver owns order placement. Read-only operations (fetch_balance, fetch_market, fetch_ticker, fetch_positions) for sanity checks during authoring are fine.
 - Don't commit secrets to the registry or any tracked file. `.env` is in `.gitignore`.
-- Don't pass Builder Chat's `actions` block through to `create_query`. It will contain `market_order`, `limit_order`, or `telegram` actions that the project forbids. Use only its `conditions`; splice in your own webhook action.
-- Don't hand-write the `conditions` block from scratch when Builder Chat would do; it's fluent on common indicators (RSI, MACD, stochastic, price) and saves you from EQL syntax mistakes. Hand-edit only when Builder Chat got the conditions wrong.
-- Don't skip validation. Always `validate_query` (with the spliced webhook action) before `create_query`.
+- Don't strip or replace Builder Chat's actions block. Pass it through unchanged. The receiver consumes SSE on the query id, not the actions block.
+- Don't hand-write or hand-edit the `conditions` block ever. Builder Chat is the only authority for EQL. If its output is wrong, re-prompt with a clearer description; do not patch the JSON yourself.
+- Don't ask Elfa to execute trades. The Elfa-side action must always be notify-style. Order placement is owned by our receiver.
+- Don't skip validation. Always `validate_query` before `create_query`.

@@ -1,12 +1,20 @@
+"""Receiver: pulls trigger events from Elfa Auto via per-query SSE streams.
+
+Single asyncio supervisor maintains one SSE consumer per active strategy in
+the local registry. On stream close or disconnect, it backfills via REST
+(`GET /v2/auto/queries/:id`) to recover any fire that landed in the gap.
+"""
+
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import threading
 import time
 from typing import Optional, Protocol
 
-from fastapi import BackgroundTasks, FastAPI, Header, Request, Response
+import httpx
 
 from .alerts import AlertWriter
 from .config import Config
@@ -28,76 +36,208 @@ class _Executor(Protocol):
     ) -> dict: ...
 
 
-def create_app(
+class _ElfaClient(Protocol):
+    def get_query(self, query_id: str) -> dict: ...
+    async def stream_query(self, query_id: str): ...  # AsyncIterator[dict]
+
+
+# ---------------------------------------------------------------------------
+# Supervisor: one SSE consumer per active strategy
+# ---------------------------------------------------------------------------
+
+
+async def supervisor(
+    *,
+    config: Config,
+    registry: Registry,
+    elfa: _ElfaClient,
+    executor: _Executor,
+    alerts: AlertWriter,
+    poll_interval: float = 5.0,
+    stop: Optional[asyncio.Event] = None,
+) -> None:
+    """Long-running supervisor. Spawns a per-strategy SSE task for each
+    `active` row in the local registry. Reconciles every `poll_interval`
+    seconds so newly-added strategies get picked up without restart.
+    Exits cleanly when `stop` is set.
+    """
+    tasks: dict[str, asyncio.Task] = {}
+    stop = stop or asyncio.Event()
+    logger.info("supervisor started (poll_interval=%.1fs)", poll_interval)
+    try:
+        while not stop.is_set():
+            try:
+                active = registry.list_strategies(status="active")
+            except Exception:  # noqa: BLE001 - registry read should never crash supervisor
+                logger.exception("registry list failed; will retry")
+                await _wait_or_stop(stop, poll_interval)
+                continue
+
+            active_qids = {s.query_id for s in active}
+
+            for qid in active_qids - set(tasks):
+                logger.info("spawning SSE task for %s", qid)
+                tasks[qid] = asyncio.create_task(
+                    _strategy_loop(
+                        qid,
+                        config=config, registry=registry,
+                        elfa=elfa, executor=executor, alerts=alerts,
+                    ),
+                    name=f"sse-{qid[:8]}",
+                )
+
+            for qid in list(tasks):
+                if tasks[qid].done():
+                    exc = tasks[qid].exception()
+                    if exc is not None:
+                        logger.error("strategy loop %s exited with %r", qid, exc)
+                    else:
+                        logger.info("strategy loop %s finished", qid)
+                    del tasks[qid]
+
+            await _wait_or_stop(stop, poll_interval)
+    finally:
+        logger.info("supervisor shutting down; cancelling %d task(s)", len(tasks))
+        for t in tasks.values():
+            t.cancel()
+        for t in tasks.values():
+            try:
+                await t
+            except (asyncio.CancelledError, Exception):
+                pass
+
+
+async def _wait_or_stop(stop: asyncio.Event, secs: float) -> None:
+    try:
+        await asyncio.wait_for(stop.wait(), timeout=secs)
+    except asyncio.TimeoutError:
+        pass
+
+
+async def _strategy_loop(
+    query_id: str,
+    *,
+    config: Config,
+    registry: Registry,
+    elfa: _ElfaClient,
+    executor: _Executor,
+    alerts: AlertWriter,
+    backoff_initial: float = 2.0,
+    backoff_max: float = 60.0,
+) -> None:
+    """One iteration per (re)connect attempt. On terminal Elfa-side status
+    (anything but `active`), backfill any executions we missed and exit.
+    """
+    loop = asyncio.get_running_loop()
+    backoff = backoff_initial
+    while True:
+        # 1. REST status check / backfill before opening SSE. Cheap and
+        #    handles the case where the strategy already triggered while
+        #    the supervisor was offline.
+        try:
+            query_state = await loop.run_in_executor(None, elfa.get_query, query_id)
+        except Exception as e:  # noqa: BLE001
+            logger.warning("backfill GET failed for %s: %r", query_id, e)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, backoff_max)
+            continue
+
+        if query_state.get("status") != "active":
+            await _replay_missed_executions(
+                query_id, query_state,
+                config=config, registry=registry,
+                executor=executor, alerts=alerts,
+            )
+            return  # done with this strategy
+
+        # 2. Open SSE. The iterator naturally exits when the stream closes
+        #    (after a fire, or on connection error). On exit we loop back to
+        #    step 1 which either backfills (terminal) or reconnects (active).
+        try:
+            async for ev in elfa.stream_query(query_id):
+                event_id = ev.get("event_id") or "unknown"
+                payload = ev.get("data") or {}
+                raw_payload = json.dumps(payload)
+                await loop.run_in_executor(
+                    None,
+                    _process_fire,
+                    event_id, query_id, raw_payload,
+                    registry, executor, alerts, config,
+                )
+                backoff = backoff_initial
+        except (httpx.HTTPError, ConnectionError) as e:
+            logger.warning("SSE transport error for %s: %r; backoff %.1fs",
+                           query_id, e, backoff)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, backoff_max)
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception("unexpected error in SSE iteration for %s", query_id)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, backoff_max)
+
+
+async def _replay_missed_executions(
+    query_id: str,
+    query_state: dict,
     *,
     config: Config,
     registry: Registry,
     executor: _Executor,
     alerts: AlertWriter,
-) -> FastAPI:
-    app = FastAPI(title="elfa-grvt-bot receiver")
-
-    @app.get("/healthz")
-    def healthz() -> dict:
-        return {"ok": True}
-
-    @app.post("/auto/events")
-    async def auto_events(
-        request: Request,
-        background_tasks: BackgroundTasks,
-        # Elfa Auto webhook delivery is unsigned (no X-Auto-Signature header).
-        # Only X-Auto-Event-Id is required, used as a dedupe key. SECURITY
-        # NOTE: anyone who guesses the public webhook URL could fire trades;
-        # mitigations are private tunnel URLs and the per-strategy notional
-        # cap enforced in guardrails.
-        x_auto_event_id: Optional[str] = Header(default=None, alias="X-Auto-Event-Id"),
-    ) -> Response:
-        if not x_auto_event_id:
-            logger.warning("missing X-Auto-Event-Id header")
-            return Response(status_code=400, content="missing X-Auto-Event-Id")
-        raw = await request.body()
-        background_tasks.add_task(
-            _process_event,
-            event_id=x_auto_event_id,
-            raw=raw,
-            registry=registry,
-            executor=executor,
-            alerts=alerts,
-            config=config,
+) -> None:
+    """For each execution Elfa reports, replay it through `_process_fire` if
+    our local registry hasn't already recorded that fire. Dedupe is by
+    execution id (same identifier the SSE notification carries).
+    """
+    loop = asyncio.get_running_loop()
+    for ex in query_state.get("executions") or []:
+        ex_id = ex.get("id")
+        if not ex_id:
+            continue
+        existing = await loop.run_in_executor(None, registry.get_fire, ex_id)
+        if existing is not None:
+            continue
+        synth = {
+            "status": query_state.get("status"),
+            "queryId": query_id,
+            "executionId": ex_id,
+            "triggerTime": ex.get("createdAt"),
+            "source": "rest_backfill",
+        }
+        logger.info("backfilling missed execution %s for query %s", ex_id, query_id)
+        await loop.run_in_executor(
+            None,
+            _process_fire,
+            ex_id, query_id, json.dumps(synth),
+            registry, executor, alerts, config,
         )
-        # Pass background_tasks explicitly so they run regardless of FastAPI's
-        # implicit response-attachment behavior across versions.
-        return Response(status_code=200, content="ok", background=background_tasks)
-
-    return app
 
 
-def _process_event(
-    *,
+# ---------------------------------------------------------------------------
+# Fire handler
+# ---------------------------------------------------------------------------
+
+
+def _process_fire(
     event_id: str,
-    raw: bytes,
+    query_id: str,
+    raw_payload: str,
     registry: Registry,
     executor: _Executor,
     alerts: AlertWriter,
     config: Config,
 ) -> None:
-    """Top-level safety net.
-
-    Any uncaught exception inside ``_process_event_inner`` (malformed JSON,
-    sqlite errors, …) would otherwise vanish into the background task with the
-    200 already returned to Auto. Catch everything and emit a high-severity
-    alert so the operator hears about it on Telegram.
+    """Top-level safety net: any uncaught exception inside `_process_fire_inner`
+    must emit a high-severity alert rather than vanishing into asyncio.
     """
     try:
-        _process_event_inner(
-            event_id=event_id,
-            raw=raw,
-            registry=registry,
-            executor=executor,
-            alerts=alerts,
-            config=config,
+        _process_fire_inner(
+            event_id=event_id, query_id=query_id, raw_payload=raw_payload,
+            registry=registry, executor=executor, alerts=alerts, config=config,
         )
-    except Exception as exc:  # noqa: BLE001 , top-level safety net
+    except Exception as exc:  # noqa: BLE001
         logger.exception("unhandled error processing event %s", event_id)
         try:
             alerts.emit(
@@ -110,24 +250,23 @@ def _process_event(
                 fire_event_id=event_id,
                 details={
                     "exception_type": type(exc).__name__,
-                    "raw_payload": raw.decode(errors="replace")[:1000],
+                    "raw_payload": raw_payload[:1000],
                 },
             )
-        except Exception:  # noqa: BLE001 , alerting itself failed
+        except Exception:  # noqa: BLE001
             logger.exception("alert emission failed for event %s", event_id)
 
 
-def _process_event_inner(
+def _process_fire_inner(
     *,
     event_id: str,
-    raw: bytes,
+    query_id: str,
+    raw_payload: str,
     registry: Registry,
     executor: _Executor,
     alerts: AlertWriter,
     config: Config,
 ) -> None:
-    payload = json.loads(raw.decode() or "{}")
-    query_id = payload.get("queryId") or payload.get("query_id") or ""
     received_at = int(time.time())
 
     inserted = registry.insert_fire_if_new(
@@ -135,7 +274,7 @@ def _process_event_inner(
         query_id=query_id,
         received_at=received_at,
         outcome="pending",
-        raw_payload=raw.decode(errors="replace"),
+        raw_payload=raw_payload,
     )
     if not inserted:
         logger.info("duplicate event %s , skipped", event_id)
@@ -155,11 +294,6 @@ def _process_event_inner(
         )
         return
 
-    # Inline silent status check before anything else. Auto retries on
-    # already-fired strategies should NOT ping Telegram. This used to live
-    # inside check_guardrails (category="guardrail_status"); we promote it
-    # here so the trigger_received Telegram ping below can fire as early as
-    # possible without spamming on retries.
     if strategy.status != "active":
         reason = f"strategy status is {strategy.status!r}, only 'active' fires"
         registry.update_fire_outcome(
@@ -169,11 +303,9 @@ def _process_event_inner(
         return
 
     # IMMEDIATE Telegram ping: dispatched in a daemon thread so it runs in
-    # parallel with set_leverage + place_entry_with_tpsl. The user explicitly wants the
-    # notification to happen "immediately and simultaneously" with the order,
-    # not after order placement returns. Failures inside the thread are
-    # swallowed (already logged by AlertWriter); they must never affect order
-    # placement.
+    # parallel with set_leverage + place_entry_with_tpsl. Failures inside the
+    # thread are swallowed (already logged by AlertWriter); they must never
+    # affect order placement.
     def _fire_trigger_alert() -> None:
         try:
             alerts.emit(
@@ -193,8 +325,6 @@ def _process_event_inner(
         target=_fire_trigger_alert, daemon=True, name=f"alert-{event_id}"
     ).start()
 
-    # ---- Order placement runs concurrently with the alert thread above ----
-
     try:
         current_mid = executor.fetch_mid_price(strategy.symbol)
     except Exception as exc:
@@ -211,15 +341,9 @@ def _process_event_inner(
         return
 
     guard = check_guardrails(
-        strategy=strategy,
-        current_mid=current_mid,
-        receiver_env=config.grvt_env,
+        strategy=strategy, current_mid=current_mid, receiver_env=config.grvt_env,
     )
     if isinstance(guard, Reject):
-        # Status check was already done above; remaining guardrails are
-        # env / notional. Symbol existence is GRVT's call (fetch_mid_price
-        # above already failed if the symbol is missing). All of these
-        # want a Telegram alert.
         registry.update_fire_outcome(
             event_id, outcome="rejected_guardrail", error=guard.reason
         )
@@ -248,15 +372,6 @@ def _process_event_inner(
             )
             return
 
-    # ---- Atomic entry + (optional) TP/SL via bulk_orders v2 ----
-    # place_entry_with_tpsl never raises; it returns a dict with parent /
-    # tp / sl ids and an `errors` list. We branch on whether the parent
-    # leg landed:
-    #   - parent_order_id set, no errors  -> happy path (info alerts)
-    #   - parent_order_id set, has errors -> entry placed, TP/SL needs
-    #     manual intervention
-    #   - parent_order_id is None         -> entry failed; leave strategy
-    #     active for Auto retry unless the error looks terminal
     pair = executor.place_entry_with_tpsl(
         symbol=strategy.symbol,
         entry_side=strategy.side,
@@ -270,15 +385,9 @@ def _process_event_inner(
     parent_id = pair.get("parent_order_id")
     errors = pair.get("errors") or []
 
-    # ---- Entry failed entirely ----
     if parent_id is None:
         joined = "; ".join(errors) or "unknown bulk_orders failure"
-        registry.update_fire_outcome(
-            event_id, outcome="grvt_error", error=joined
-        )
-        # Best-effort terminal classification so a clearly broken strategy
-        # (bad symbol, insufficient margin, malformed price) doesn't keep
-        # firing on every Auto retry. Anything else stays active.
+        registry.update_fire_outcome(event_id, outcome="grvt_error", error=joined)
         joined_lower = joined.lower()
         terminal_markers = (
             "insufficient margin", "insufficient_margin",
@@ -300,19 +409,13 @@ def _process_event_inner(
         )
         return
 
-    # ---- Entry placed: flip strategy to 'fired' before doing anything else.
-    # If the registry write fails we still own the on-exchange position; emit
-    # manual_intervention_required so the operator can reconcile before any
-    # further Auto retry can place a duplicate.
     try:
         registry.set_strategy_status(query_id, "fired", fired_at=received_at)
         registry.update_fire_outcome(
             event_id, outcome="placed", grvt_order_id=parent_id
         )
-    except Exception as exc:  # noqa: BLE001 , real-money safety net
-        logger.exception(
-            "registry write failed AFTER successful entry placement , manual reconciliation required"
-        )
+    except Exception as exc:  # noqa: BLE001
+        logger.exception("registry write failed AFTER successful entry placement")
         alerts.emit(
             severity="error",
             category="manual_intervention_required",
@@ -330,9 +433,6 @@ def _process_event_inner(
         )
         return
 
-    # Order id from bulk_orders is the literal "0x00" placeholder until GRVT
-    # settles on chain, which is noise. Drop it from the user-visible alert
-    # and keep it only in the receiver's structured log line.
     alerts.emit(
         severity="info",
         category="order_placed",
@@ -343,14 +443,11 @@ def _process_event_inner(
         query_id=query_id, fire_event_id=event_id,
     )
 
-    # ---- TP/SL outcome ----
     has_tpsl = strategy.tp_pct is not None or strategy.sl_pct is not None
     if not has_tpsl:
         return
 
     if errors:
-        # Entry succeeded but at least one TP/SL leg failed. The position
-        # is open without a complete protective bracket; flag it loudly.
         alerts.emit(
             severity="error",
             category="manual_intervention_required",

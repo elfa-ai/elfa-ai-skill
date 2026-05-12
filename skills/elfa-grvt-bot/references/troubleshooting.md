@@ -26,19 +26,56 @@ The state-form operator (`<`, `>`) fires whenever the condition is true. If the 
 
 For "X dips below threshold" semantics, use `crosses_below`. It only fires on transition.
 
-## On webhook delivery (in receiver logs)
+## Receiver process died / not running
 
-### `400 missing X-Auto-Event-Id`
+Check whether the receiver is up:
 
-Elfa Auto did not include the event-id header. Should not happen with Elfa's current delivery. If it does, check that you are not behind a proxy that strips custom headers.
+```bash
+pgrep -f elfa_grvt_bot
+```
 
-### Webhook signature errors
+If nothing is returned, the process is not running. Restart it:
 
-The receiver does not verify webhook signatures (Elfa Auto delivers unsigned), so signature/timestamp 401s do not occur. If Elfa ever re-enables signed delivery, a verifier would need to be reimplemented. See `references/elfa-webhooks.md`.
+```bash
+source .venv/bin/activate
+python -m elfa_grvt_bot
+```
 
-### `422 Unprocessable Entity`
+On restart the supervisor immediately runs a REST backfill for every active strategy: it calls `GET /v2/auto/queries/:id` for each registered active strategy and replays any executions not already in the local `fires` table. No manual intervention is needed for backlog -- missed fires are recovered automatically.
 
-FastAPI rejected the request because a header type didn't match. Check the receiver's `auto_events` declaration vs what Elfa sends; if Elfa changes header names, update the receiver.
+## On SSE stream connection (in receiver logs)
+
+### `401 Unauthorized` on stream open
+
+`ELFA_API_KEY` is wrong or expired. The `stream_query` call raises a `RuntimeError` with the status code. Rotate the key in `.env` and restart.
+
+### `404 Not Found` on stream open
+
+The query no longer exists on Elfa's side (was hard-deleted). The supervisor will observe a non-`active` status on the next REST check and stop the per-strategy task automatically. No action required unless the strategy should be replaced.
+
+### Stream closes without a notification event
+
+Normal behavior. A query stream emits at most one `notification` event (the trigger), then `event: end`, and the server closes the connection. If the condition hasn't fired yet, the stream may stay open for a long time and then close on the server's schedule. The supervisor re-opens it on the next reconcile loop.
+
+### Stream disconnects with a network error
+
+Expected on flaky networks. The per-strategy `_strategy_loop` catches `httpx.HTTPError` and `ConnectionError`, logs a warning, and retries with exponential backoff (initial 2s, max 60s). During the gap, any fires that landed are picked up by the REST backfill on reconnect.
+
+### Nothing in the logs after "supervisor started"
+
+The supervisor found no active strategies to spawn tasks for. Check that at least one strategy is registered and active:
+
+```bash
+python src/registry_cli.py list --status active
+```
+
+If the output is empty, no strategies have been registered yet, or all were previously cancelled/fired.
+
+## Fires that didn't get processed live (recovered via backfill)
+
+If the receiver was offline when a strategy triggered, the fire is not lost. On startup (and after every SSE reconnect), the supervisor calls `GET /v2/auto/queries/:id` for each active strategy. The response includes an `executions` array. For each entry whose `id` is absent from the local `fires` table, the supervisor calls `_process_fire` with a synthetic payload (`"source": "rest_backfill"`). The execution goes through the same guardrails, leverage, and GRVT order placement path as a live SSE event.
+
+Deduplication is by execution id, so a fire can never be processed twice even if backfill and a live SSE event race.
 
 ## In Telegram alerts
 
@@ -52,10 +89,9 @@ Two main paths produce this alert:
 
 ### `unknown_strategy`
 
-Webhook arrived with a `queryId` that has no matching row in the registry. Causes:
+A fire was received for a `queryId` that has no matching row in the registry. Causes:
 - Auto query was registered but the local registry write failed
 - Local DB was reset / migrated and lost the row
-- Webhook delivered to the wrong receiver (URL mix-up)
 
 Look up the `queryId` on Elfa's side via `GET /v2/auto/queries/:id`. If the strategy is something you want to honor, recreate the registry row manually with `registry_cli.py add`.
 
@@ -80,27 +116,6 @@ Order rejected by GRVT for lack of margin. Either fund the account or reduce str
 ### `grvt_other`
 
 Catch-all GRVT error. Read the message. If it is a known pattern (geo-block, rate-limit, instrument suspended), document and add specific handling.
-
-## At the cloudflared tunnel layer
-
-### Tunnel URL responds locally but Elfa webhook never arrives
-
-cloudflared's quick tunnels (the `--url` form) are ephemeral. If cloudflared restarts, the URL changes but existing strategies on Elfa still point at the old URL. The webhook will hit a dead URL.
-
-Solutions:
-- Always re-create strategies after a tunnel restart with the new URL.
-- Move to a named cloudflared tunnel (`cloudflared tunnel create`).
-- Move to a PaaS deploy with a stable HTTPS URL.
-
-### `Could not resolve host: <subdomain>.trycloudflare.com`
-
-Local DNS hasn't propagated the new subdomain yet. This does not affect Elfa (their resolver picks up new domains quickly). Test the tunnel from another network, or wait a minute.
-
-### `cloudflared: command not found`
-
-Install:
-- macOS: `brew install cloudflared`
-- Linux: download from `https://github.com/cloudflare/cloudflared/releases`
 
 ## At the GRVT order placement layer
 
@@ -131,12 +146,9 @@ api_key = os.environ['ELFA_API_KEY']
 sqlite3 registry.db "UPDATE strategies SET status='cancelled' WHERE status='active';"
 
 # 3. Stop the receiver
-pkill -9 -f "elfa_grvt_bot"
+pkill -f "elfa_grvt_bot"
 
-# 4. Stop the tunnel
-pkill -9 cloudflared
-
-# 5. Manually close any open GRVT positions via the UI
+# 4. Manually close any open GRVT positions via the UI
 ```
 
 This is a panic stop, not a graceful shutdown. Use only when something is wrong and you need to halt all firing immediately.

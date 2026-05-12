@@ -10,7 +10,6 @@ def _full_env(monkeypatch):
         "GRVT_TRADING_ACCOUNT_ID": "ta_1",
         "TELEGRAM_BOT_TOKEN": "bot_test",
         "TELEGRAM_CHAT_ID": "12345",
-        "RECEIVER_PUBLIC_URL": "https://example.test",
         "REGISTRY_DB_PATH": "/tmp/registry-test.db",
     }
     for k, v in env.items():
