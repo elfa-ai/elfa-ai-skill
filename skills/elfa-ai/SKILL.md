@@ -215,6 +215,8 @@ Use the `bash_tool` to call the Elfa API via curl.
    - Always read the API key from the `ELFA_API_KEY` environment variable, never ask the
      user to paste it into the conversation.
    - Never log or expose the full API key in outputs — mask it when displaying curl commands.
+   - **Never echo or print environment variables:** Do not run `echo $ELFA_API_KEY`, `env | grep ELFA`,
+     `printenv`, or similar commands that would expose credentials in the transcript.
    - If a user does paste a key in chat, warn them to rotate it and set it as an env var instead.
 
 **Free tier limitations:**
@@ -351,7 +353,8 @@ For API key lifecycle/cleanup calls, preserve this order when each operation app
 
 > **Cancel and delete are distinct operations.** `POST /cancel` flips an active query to `cancelled` (terminal). `DELETE` removes the record entirely and only works on terminal queries. Sending `DELETE` on an active query returns `409 Conflict`.
 
-For trade actions (`market_order`, `limit_order`, or `llm` with a trade callback), preflight `GET /v2/auto/exchanges` before create — without an active exchange connection the trigger fires but the order placement fails.
+**Important — Exchange preflight for trade actions:**
+For trade actions (`market_order`, `limit_order`, or `llm` with a trade callback), **always call `GET /v2/auto/exchanges` before creating the query** to verify the target exchange is connected. Without an active exchange connection, query creation may succeed but the trade action fails at execution time with `AGENT_WALLET_REQUIRED`. If the exchange is not connected, inform the user they need to link it via the Elfa dashboard before the trade trigger can work.
 
 x402 mode supports the same lifecycle except: x402 has no `DELETE` endpoint (cancel-only), and trade actions are not available via x402.
 
@@ -1556,9 +1559,12 @@ OR `from`/`to` unix timestamps. If both are provided, `from`/`to` takes priority
 Most list endpoints support `page` and `pageSize`. The keyword-mentions endpoint uses
 cursor-based pagination instead (`cursor` parameter).
 
-**Ticker format:**
-For `top-mentions`, the `ticker` param can be prefixed with `$` to match only cashtags
-(e.g., `$SOL` vs `SOL`).
+**Ticker format (top-mentions):**
+The `ticker` parameter behavior changes based on whether you include the `$` prefix:
+- **With `$` prefix** (e.g., `ticker=$SOL` or URL-encoded `ticker=%24SOL`): Exact cashtag matching only. Searches the `cashtags` field for exact matches.
+- **Without `$` prefix** (e.g., `ticker=SOL`): Broader search across both cashtags (boosted 2x) and general token references.
+
+Use `$` when you want only cashtag-specific mentions. Omit `$` for a more inclusive search.
 
 **Credit costs (data endpoints — both modes):**
 - Most endpoints: 1 credit per call ($0.009 via x402)
@@ -1567,7 +1573,9 @@ For `top-mentions`, the `ticker` param can be prefixed with `$` to match only ca
 - Chat: fast = 5 credits ($0.045), expert = 18 credits ($0.162) via x402
 
 **Auto query lifecycle:**
-- Always validate before create
+- **Validate before create (recommended):** Call `POST /v2/auto/queries/validate` first to preview
+  estimated credits and catch validation errors before committing. The server validates internally
+  during create anyway, but pre-validation lets you iterate on errors without side effects.
 - Prefer webhook or SSE for real-time delivery
 - Deduplicate events by `eventId`
 - Use shorter expiries (`24h`–`3d`) for fresh signals
