@@ -6,13 +6,13 @@ High-level design of the elfa-grvt-bot.
 
 ```
 ┌─────────────────────────────┐
-│  USER (chat with Claude)    │
+│  USER (chat with agent)     │
 │  describes a strategy       │
 └──────────────┬──────────────┘
                │
                ▼
 ┌─────────────────────────────┐         ┌──────────────────────────┐
-│  CLAUDE SESSION             │ ──────▶ │  Elfa Builder Chat       │
+│  AGENT SESSION              │ ──────▶ │  Elfa Builder Chat       │
 │  + this skill               │ ◀────── │  POST /v2/auto/chat      │
 │  + grvt-trading skill       │         └──────────────────────────┘
 │  (read-only sanity checks)  │
@@ -23,7 +23,7 @@ High-level design of the elfa-grvt-bot.
                ▼
 ┌─────────────────────────────┐
 │  Local SQLite registry      │   strategies, fires, alerts tables
-│  (registry.db)              │   shared by Claude session + receiver
+│  (registry.db)              │   shared by agent session + receiver
 └──────────────┬──────────────┘
                │
    ┌───────────▼─────────────────────────────────┐
@@ -117,10 +117,10 @@ The three alerts a normal fire produces:
 
 Two delivery channels read from the registry:
 
-- **In-chat (always on).** A `UserPromptSubmit` hook (`.claude/settings.json` → `scripts/show_pending_alerts.sh`) queries unacked alerts before each Claude turn and injects them as context, so Claude relays them to the user directly. After surfacing, Claude runs `python -m registry_cli ack all` to clear the queue.
+- **In-chat (via `AGENTS.md`).** Generated `AGENTS.md` instructs the agent to run `python src/registry_cli.py alerts --pending` on every session start and surface unacked alerts before doing anything else. After surfacing, the agent runs `python -m registry_cli ack all` to clear the queue. Agents that support session-start or per-prompt hooks can wire `scripts/show_pending_alerts.sh` for automatic injection — see your agent's docs.
 - **Telegram (optional, real-time push).** When configured, `AlertWriter.emit()` calls `telegram_sender.send()` synchronously after the registry write. When unconfigured, it is silently skipped — no error, no retry queue. Telegram exceptions never bubble up; they're logged as warnings so a flaky bot can't break order placement.
 
-This dual design means the user always gets alerts in chat (free, no extra credentials), and optionally also gets push notifications on their phone for real-time visibility while away from Claude.
+This dual design means the user always gets alerts in chat (free, no extra credentials), and optionally also gets push notifications on their phone for real-time visibility while away from the agent.
 
 ## Idempotency
 
@@ -133,7 +133,7 @@ In layered order:
 1. Per-strategy `max_notional_usd` cap.
 2. Strategy-vs-receiver `env` match.
 3. `status='active'` gate (silent log-only on retry of fired/cancelled strategies).
-4. Symbol existence is enforced by GRVT itself: `fetch_mid_price` (and downstream order placement) fail loudly on unknown instruments and surface as `grvt_other` / `grvt_error` alerts. The user-facing safeguard is authoring-time verification — Claude calls `GrvtCcxt.fetch_market(symbol)` before creating the strategy and refuses to proceed if GRVT doesn't list it.
+4. Symbol existence is enforced by GRVT itself: `fetch_mid_price` (and downstream order placement) fail loudly on unknown instruments and surface as `grvt_other` / `grvt_error` alerts. The user-facing safeguard is authoring-time verification — the agent calls `GrvtCcxt.fetch_market(symbol)` before creating the strategy and refuses to proceed if GRVT doesn't list it.
 5. Top-level safety net: any unhandled exception in the background task emits a `receiver_internal_error` alert.
 6. Post-order DB write is wrapped: if it fails, emit `manual_intervention_required` with the order ID so the operator can manually reconcile.
 

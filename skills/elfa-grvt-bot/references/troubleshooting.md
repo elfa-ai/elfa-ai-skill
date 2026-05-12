@@ -2,7 +2,7 @@
 
 Common errors and what they mean, organized by where they surface.
 
-## During strategy authoring (Claude session, hitting Elfa)
+## During strategy authoring (agent session, hitting Elfa)
 
 ### `elfa create_query failed: 401 Unauthorized`
 

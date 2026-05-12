@@ -1,8 +1,8 @@
 # Strategy authoring flow
 
-How Claude turns a user's natural-language strategy description into an active Auto query plus a registered local strategy.
+How an agent turns a user's natural-language strategy description into an active Auto query plus a registered local strategy.
 
-This file documents the chat flow. The same instructions are also in `assets/source/CLAUDE.md`, which ships into the user's project root and runs on every Claude Code session start in that directory.
+This file documents the chat flow. The same instructions ship as `assets/source/AGENTS.template.md`, which `bootstrap.py` copies to `AGENTS.md` in the user's project root. Any agent that supports the AGENTS.md convention (most do) will pick it up on session start in that directory.
 
 ## On every session start in the project
 

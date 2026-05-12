@@ -31,7 +31,7 @@ Copy `.env.example` to `.env` and fill in:
 - **Receiver**: `RECEIVER_PUBLIC_URL` set after step 3. `REGISTRY_DB_PATH`
   defaults to `./registry.db`. Symbol validity is delegated to GRVT
   itself; if you author a strategy on a symbol GRVT doesn't list,
-  Claude flags it during authoring (and the receiver's mid-price
+  the agent flags it during authoring (and the receiver's mid-price
   fetch fails fast at fire time as a backstop).
 
 Source it:
@@ -59,16 +59,14 @@ cloudflared tunnel.)
 
 ### 4. Author a strategy
 
-Open Claude Code in this directory:
-```bash
-claude
-```
+Open your preferred agent (Claude Code, OpenCode, Cursor, Codex, or any
+agent that supports `AGENTS.md`) in this directory.
 
-Tell Claude what you want, e.g.:
+Tell the agent what you want, e.g.:
 > "Buy 0.05 BTC perp market on GRVT prod when 1h RSI dips below 30. Cap
 > notional at $4000."
 
-Claude follows the flow in `CLAUDE.md`: forwards to Elfa Builder Chat,
+The agent follows the flow in `AGENTS.md`: forwards to Elfa Builder Chat,
 validates EQL, asks for any missing params, shows the full plan, and waits
 for your "yes" before creating the Auto query and writing the registry row.
 
@@ -76,8 +74,8 @@ for your "yes" before creating the Auto query and writing the registry row.
 
 When the condition triggers, you'll see two Telegram messages: the Auto
 native alert, and the receiver's order receipt. If anything fails, you'll
-get an alert on Telegram and Claude will surface it next time you open a
-session in this directory.
+get an alert on Telegram and the agent will surface it next time you open
+a session in this directory.
 
 ## Production deploy (Fly.io / Railway / Render)
 
@@ -100,8 +98,8 @@ fly deploy
 ```
 
 Then re-authoring or migrating existing strategies: update
-`RECEIVER_PUBLIC_URL` in your shell and let Claude rewire any strategies
-you want to keep.
+`RECEIVER_PUBLIC_URL` in your shell and let the agent rewire any
+strategies you want to keep.
 
 ## Manual smoke test (one-time, on production wiring)
 

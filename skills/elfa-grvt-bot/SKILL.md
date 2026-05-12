@@ -227,7 +227,7 @@ Run the smoke test in `assets/source/docs/SMOKE_TEST.md`. It opens a tiny ($5+ n
 
 ## Strategy authoring flow
 
-When an agent session is opened in the user's working directory, the project's generated `AGENTS.md` (also mirrored as `CLAUDE.md` for clients that read it) drives the authoring flow. At a high level, when the user describes a strategy in chat:
+When an agent session is opened in the user's working directory, the project's generated `AGENTS.md` drives the authoring flow. At a high level, when the user describes a strategy in chat:
 
 1. Read pending alerts first (`python src/registry_cli.py alerts --pending`). Surface any unacked alerts at the top of the response.
 2. Forward the user's description to Elfa Builder Chat (`POST /v2/auto/chat`, body field `message`, API-key auth). Take ONLY the `conditions` block from the response and discard whatever `actions` block Builder Chat returned — it will be `market_order`/`limit_order`/`telegram` and violates the strict rule below. Hand-edit the conditions if Builder Chat got them wrong (see `references/elfa-eql.md`).
@@ -257,7 +257,6 @@ Specifics, defaults, and constraints are in `references/strategy-authoring.md`.
 | `references/strategy-authoring.md` | The full chat flow when a user describes a strategy |
 | `references/troubleshooting.md` | Common errors and what they mean |
 | `assets/source/AGENTS.template.md` | Agent-neutral project instruction template; `bootstrap.py` copies it to `AGENTS.md` in the user's project |
-| `assets/source/CLAUDE.md` | Compatibility mirror for clients that read this filename |
 
 ## Helper scripts
 

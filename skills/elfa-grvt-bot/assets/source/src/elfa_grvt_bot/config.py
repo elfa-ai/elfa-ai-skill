@@ -18,7 +18,7 @@ class Config:
     telegram_chat_id: str
     # receiver_public_url is the public HTTPS URL where Auto webhooks land.
     # Optional because the receiver itself doesn't need to know its own URL
-    # only strategy authoring (Claude session) uses it. When unset, authoring
+    # only strategy authoring (agent session) uses it. When unset, authoring
     # must fail loudly; receiver still boots fine.
     receiver_public_url: Optional[str]
     registry_db_path: str

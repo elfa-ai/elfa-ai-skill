@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# Surface pending registry alerts to the Claude session as injected
-# UserPromptSubmit context. The receiver writes every alert (trigger fired,
-# order placed, error, warning) to the SQLite registry; this script prints
-# any unacked alerts so Claude can relay them in chat in real time. This is
-# the in-chat counterpart to Telegram, and works whether Telegram is
-# configured or not.
+# Surface pending registry alerts so an agent can relay them in chat. The
+# receiver writes every alert (trigger fired, order placed, error, warning)
+# to the SQLite registry; this script prints any unacked alerts as plain
+# text. This is the in-chat counterpart to Telegram and works whether
+# Telegram is configured or not.
 #
-# Wired into .claude/settings.json as a UserPromptSubmit hook.
+# Agents should run this on every session start (AGENTS.md instructs this)
+# or whenever the user asks about strategy status. Wire it into your
+# agent's session-start / pre-prompt hook if your CLI supports it.
 #
 # Behavior:
 #   - exits 0 silently if there's nothing to report (no alerts, no DB yet,
@@ -36,7 +37,7 @@ if [[ ! -f "$REGISTRY_DB_PATH" ]]; then
 fi
 
 # Pick the project venv python if it exists; otherwise fall back to
-# whatever python3 is on PATH. Some shells used inside Claude Code don't
+# whatever python3 is on PATH. Some agent CLIs spawn shells that don't
 # inherit an active venv, so we look it up explicitly.
 PY="$PROJECT_ROOT/.venv/bin/python"
 if [[ ! -x "$PY" ]]; then

@@ -24,12 +24,12 @@ every link in the chain works end-to-end.
 
 ## Run
 
-In a Claude Code session in this directory, say:
+In an agent session in this directory, say:
 
 > "Create a smoke-test strategy: when BTC price > 0 (always true), buy
 > 0.001 BTC_USDT_Perp market. Cap notional at $100. Expiry 1h."
 
-Claude should:
+The agent should:
 1. Run `registry_cli.py alerts --pending` (no alerts expected on a fresh setup).
 2. Forward "smoke test buy 0.001 BTC when BTC > 0" to Elfa Builder Chat.
 3. Show you a draft EQL (single condition `price.current(BTC) > 0`).
@@ -66,7 +66,7 @@ would handle this automatically.)
 If anything goes wrong (signature mismatch, tunnel drop, GRVT auth):
 
 - Logs are at the receiver's stdout (or PaaS log stream).
-- Pending alerts are surfaced next Claude session in this directory.
+- Pending alerts are surfaced next agent session in this directory.
 - Cancel the Auto query immediately:
   ```bash
   python src/registry_cli.py cancel <query_id>
