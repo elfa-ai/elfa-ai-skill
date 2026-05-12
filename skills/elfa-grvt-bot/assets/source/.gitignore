@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local DB / secrets
+registry.db
+registry.db-journal
+.env
+.env.local
+
+# Editor
+.vscode/
+.idea/
+.DS_Store
+*.swp

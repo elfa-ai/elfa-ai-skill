@@ -1,45 +1,11 @@
 ---
 name: elfa-ai
 description: >
-  Interact with the Elfa API — a crypto social intelligence platform that provides real-time
-  sentiment, trending tokens, narrative tracking, AI-powered market analysis from Twitter/X
-  and Telegram, and a managed condition engine (Auto) for building automated trigger-based
-  agent workflows. Use this skill whenever the user wants to query crypto social data, check
-  trending tokens or narratives, look up mentions for a ticker or keyword, get smart stats for
-  a Twitter account, retrieve token news, find trending contract addresses, chat with Elfa's AI
-  for market analysis, or set up automated monitoring and triggers via Auto. Also trigger when
-  the user asks how to integrate the Elfa API, wants example code or curl commands for Elfa
-  endpoints, mentions "elfa" in the context of crypto data, or wants to build condition-based
-  alerts and agent workflows. This skill covers both making live API calls (via API key or x402
-  keyless payments) and generating correct code snippets for developers integrating the Elfa API
-  into their own products. Supports two access modes: traditional API key authentication and
-  x402 pay-per-request via USDC on Base (no registration required).
-env:
-  - name: ELFA_API_KEY
-    description: >
-      Elfa API key for authenticated requests. Optional — only needed for API key mode.
-      Get a free key at https://go.elfa.ai/claude-skills. Not required if using x402 mode.
-    required: false
-  - name: ELFA_HMAC_SECRET
-    description: >
-      HMAC secret for signing Auto mutation requests. Required for trade-action
-      mutations (`market_order`, `limit_order`, `llm` callback to those) and exchange
-      linking under /v2/auto/. Notification-only mutations (`notify`, `telegram_bot`,
-      `webhook`, `llm` callback to those) skip HMAC and do NOT require this secret.
-      Always-signing remains safe — signed requests are accepted on every route.
-      Get this from the Elfa Developer Portal.
-    required: false
-  - name: ELFA_AGENT_SECRET
-    description: >
-      Persistent agent identity secret for x402 Auto. Generate once with
-      `openssl rand -hex 32` and reuse for all query lifecycle calls.
-      Required only for x402 Auto mode.
-    required: false
-credentials:
-  primary: ELFA_API_KEY (optional — x402 mode requires no credentials from the user)
-  hmac: ELFA_HMAC_SECRET (optional — required only for trade mutations and exchange linking; notification-only mutations skip HMAC)
-  agent_secret: ELFA_AGENT_SECRET (optional — only for x402 Auto identity)
-  x402: Wallet-based signing handled client-side by @x402/fetch or @x402/axios libraries
+  Use this skill for Elfa API crypto social intelligence and Auto condition-engine workflows:
+  trending tokens, narratives, mentions, smart account stats, token news, trending contract
+  addresses, AI market chat, integration examples, curl/code snippets, automated alerts,
+  EQL queries, trigger pipelines, and agent workflows that react to market conditions.
+  Supports API-key calls and x402 pay-per-request USDC on Base.
 ---
 
 # Elfa API Skill
@@ -52,6 +18,18 @@ condition engine and trigger pipeline — describe what to watch for, and Auto e
 continuously and fires actions when conditions are met.
 
 Full documentation: [docs.elfa.ai](https://docs.elfa.ai)
+
+## Environment and credentials
+
+Elfa supports API-key auth and x402 keyless payments. API keys are optional when using x402.
+
+| Variable | Required | Use |
+|---|---:|---|
+| `ELFA_API_KEY` | No | API-key authenticated requests. Get a free key at <https://go.elfa.ai/claude-skills>. |
+| `ELFA_HMAC_SECRET` | No | HMAC secret for Auto trade-action mutations (`market_order`, `limit_order`, or `llm` callbacks to those) and exchange linking. Notification-only mutations (`notify`, `telegram_bot`, `webhook`, or `llm` callbacks to those) accept unsigned requests today; the HMAC requirement on trade actions reflects current documented policy and is subject to change. Always-signing remains compatible if you prefer to avoid edge cases. |
+| `ELFA_AGENT_SECRET` | No | Persistent agent identity secret for x402 Auto. Generate once with `openssl rand -hex 32` and reuse for query lifecycle calls. |
+
+x402 wallet signing is handled client-side by `@x402/fetch` or `@x402/axios`.
 
 ## When to use this skill
 

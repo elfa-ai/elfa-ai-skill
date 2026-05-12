@@ -1,65 +1,66 @@
 # Elfa AI Skills
 
-Real-time crypto social intelligence and automated condition engine for AI coding agents. Track trending tokens, surface narratives, search mentions, run market analysis, and build automated trigger-based workflows — all from your agent's chat.
+Real-time crypto social intelligence and automated condition-engine skills for AI agents. Track trending tokens, surface narratives, search mentions, run market analysis, build automated trigger-based workflows, and wire Elfa Auto signals into GRVT execution.
 
 Works with **Claude Code**, **OpenCode**, **Cursor**, **GitHub Copilot**, **Codex**, and any tool that supports the [Agent Skills](https://agentskills.io) standard.
 
 ## Installation
 
-### Any Agent (Recommended)
+### Quick (any agent)
 
 ```bash
 npx skills add elfa-ai/skills
 ```
 
-This uses the [Skills CLI](https://github.com/vercel-labs/skills) to install skills via symlink. Works with Claude Code, Cursor, Windsurf, Codex, and [40+ other agents](https://github.com/vercel-labs/skills#supported-agents). Skills stay up to date — run `npx skills update` to pull the latest.
+Installs both skills via the [Skills CLI](https://github.com/vercel-labs/skills); works with Claude Code, Cursor, Windsurf, Codex, and [40+ other agents](https://github.com/vercel-labs/skills#supported-agents). Add `--global` to install for all projects. Run `npx skills update` to refresh.
 
-Install globally (available across all projects):
+### Manual (spec-compliant `.agents/skills/`)
+
+For any agent that supports the [Agent Skills](https://agentskills.io) standard:
 
 ```bash
-npx skills add elfa-ai/skills --global
+git clone https://github.com/elfa-ai/skills elfa-skills
+cd elfa-skills
+
+# Project-level (current directory only)
+mkdir -p .agents/skills && cp -r skills/. .agents/skills/
+
+# OR user-level (all projects)
+mkdir -p ~/.agents/skills && cp -r skills/. ~/.agents/skills/
 ```
 
-### Manual Install
+### Manual (agent-specific paths)
 
-<details>
-<summary>Claude Code</summary>
+If your agent doesn't yet scan `.agents/skills/`, copy into its native skills directory:
+
+| Agent | Project-level | User-level |
+|---|---|---|
+| Spec-compliant | `.agents/skills/` | `~/.agents/skills/` |
+| Claude Code | `.claude/skills/` | `~/.claude/skills/` |
+| OpenCode | `.opencode/skills/` | `~/.config/opencode/skills/` |
 
 ```bash
-# Project-level (this project only)
-mkdir -p .claude/skills/elfa-ai
-cp skills/elfa-ai/SKILL.md .claude/skills/elfa-ai/
-cp -r skills/elfa-ai/references/ skills/elfa-ai/scripts/ .claude/skills/elfa-ai/
-
-# Global (all projects)
-mkdir -p ~/.claude/skills/elfa-ai
-cp skills/elfa-ai/SKILL.md ~/.claude/skills/elfa-ai/
-cp -r skills/elfa-ai/references/ skills/elfa-ai/scripts/ ~/.claude/skills/elfa-ai/
+# Example: install all skills into Claude Code globally
+mkdir -p ~/.claude/skills && cp -r skills/. ~/.claude/skills/
 ```
 
-</details>
-
 <details>
-<summary>OpenCode</summary>
+<summary>Cursor (uses rule format)</summary>
+
+Cursor doesn't read `SKILL.md` directly; wrap each skill in an always-on rule:
 
 ```bash
-mkdir -p ~/.config/opencode/skills/elfa-ai
-cp skills/elfa-ai/SKILL.md ~/.config/opencode/skills/elfa-ai/
-cp -r skills/elfa-ai/references/ skills/elfa-ai/scripts/ ~/.config/opencode/skills/elfa-ai/
-```
-
-</details>
-
-<details>
-<summary>Cursor</summary>
-
-```bash
-mkdir -p .cursor/rules
-echo '---' > .cursor/rules/elfa-ai.mdc
-echo 'description: "Elfa AI — crypto social intelligence, trending tokens, mentions, and market analysis"' >> .cursor/rules/elfa-ai.mdc
-echo 'alwaysApply: true' >> .cursor/rules/elfa-ai.mdc
-echo '---' >> .cursor/rules/elfa-ai.mdc
-cat skills/elfa-ai/SKILL.md >> .cursor/rules/elfa-ai.mdc
+for SKILL in skills/*/; do
+  NAME=$(basename "$SKILL")
+  mkdir -p .cursor/rules
+  {
+    echo '---'
+    echo "description: \"$NAME\""
+    echo 'alwaysApply: true'
+    echo '---'
+    cat "$SKILL/SKILL.md"
+  } > ".cursor/rules/$NAME.mdc"
+done
 ```
 
 </details>
@@ -68,16 +69,22 @@ cat skills/elfa-ai/SKILL.md >> .cursor/rules/elfa-ai.mdc
 <summary>GitHub Copilot</summary>
 
 ```bash
-cat skills/elfa-ai/SKILL.md >> .github/copilot-instructions.md
+for SKILL in skills/*/SKILL.md; do
+  cat "$SKILL" >> .github/copilot-instructions.md
+  echo >> .github/copilot-instructions.md
+done
 ```
 
 </details>
 
 <details>
-<summary>Codex</summary>
+<summary>Codex (AGENTS.md)</summary>
 
 ```bash
-cp skills/elfa-ai/SKILL.md AGENTS.md
+for SKILL in skills/*/SKILL.md; do
+  cat "$SKILL" >> AGENTS.md
+  echo >> AGENTS.md
+done
 ```
 
 </details>
@@ -86,18 +93,38 @@ cp skills/elfa-ai/SKILL.md AGENTS.md
 <summary>Claude Desktop (attach file)</summary>
 
 1. Start a conversation in Claude Desktop
-2. Attach `skills/elfa-ai/SKILL.md` as a file
+2. Attach the relevant `skills/<name>/SKILL.md` as a file
 3. Ask Claude to use the skill
 
-For a bundled package with API docs and scripts included, run `./skills/elfa-ai/scripts/build-skill.sh` and attach the generated `dist/elfa-ai.skill` instead.
+For a bundled `.skill` package with API docs and scripts included (currently `elfa-ai` only), run `./skills/elfa-ai/scripts/build-skill.sh` and attach the generated `dist/elfa-ai.skill` instead.
 
 </details>
+
+### Setting up `elfa-grvt-bot`
+
+`elfa-grvt-bot` ships a full Python project under `assets/source/`. After install, run the skill's bootstrap to create the bot's working directory, install dependencies, start the receiver, and open a public tunnel. From your agent, just ask:
+
+> "Set up the Elfa GRVT bot."
+
+The agent will execute `scripts/bootstrap.py` and walk you through credential gathering for Elfa, GRVT, and (optionally) Telegram. See [`skills/elfa-grvt-bot/SKILL.md`](skills/elfa-grvt-bot/SKILL.md) for the full setup walkthrough.
 
 ## Skills
 
 | Skill | Description |
 |---|---|
 | [elfa-ai](skills/elfa-ai) | Crypto social intelligence + Auto condition engine — trending tokens, mentions, narratives, AI market analysis, and automated trigger workflows |
+| [elfa-grvt-bot](skills/elfa-grvt-bot) | Self-hosted Elfa Auto to GRVT perpetual futures bot with FastAPI receiver, EIP-712 signing, SQLite registry, Telegram alerts, and OTOCO TP/SL execution |
+
+## Spec validation
+
+Every skill in this repo follows the [Agent Skills](https://agentskills.io/specification.md) directory format: `SKILL.md` at the skill root, optional `scripts/`, `references/`, and `assets/` resources, and spec-compatible frontmatter.
+
+Validate a skill before publishing changes:
+
+```bash
+uvx --from skills-ref agentskills validate ./skills/elfa-ai
+uvx --from skills-ref agentskills validate ./skills/elfa-grvt-bot
+```
 
 ## Get an API key
 
@@ -150,6 +177,12 @@ Create an Auto query that triggers when ETH RSI drops below 30 on the 1h chart
 ```
 Help me build a multi-condition trigger for BTC + ETH breakout confirmation
 ```
+
+```
+Set up the Elfa GRVT bot and create a SOL RSI dip-buy strategy with TP and SL
+```
+
+`elfa-grvt-bot` is live-trading infrastructure. It is prod-only for GRVT and asks for explicit confirmation before activating any strategy.
 
 ## API endpoints
 
