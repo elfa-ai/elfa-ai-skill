@@ -394,9 +394,9 @@ class GrvtTriggerClient:
         ``full/v2/bulk_orders``.
 
         Shapes:
-        - tp_pct AND sl_pct: OTOCO (parent + TP + SL), 3 orders.
-        - tp_pct XOR sl_pct: OTO (parent + 1 trigger), 2 orders.
-        - neither: single entry, 1 order.
+ - tp_pct AND sl_pct: OTOCO (parent + TP + SL), 3 orders.
+ - tp_pct XOR sl_pct: OTO (parent + 1 trigger), 2 orders.
+ - neither: single entry, 1 order.
 
         ``reference_price`` is the price used to compute TP/SL absolute
         prices from the percentages. Caller typically passes the current
@@ -632,12 +632,12 @@ class GrvtTriggerClient:
         """
         Translate the raw bulk_orders response into the executor-facing
         dict. Best-effort across response shapes:
-          - ``raw`` may itself be ``{"code": ..., "message": ...}`` for a
+ - ``raw`` may itself be ``{"code": ..., "message": ...}`` for a
             top-level error (e.g. 401, malformed batch). We mark every leg
             failed in that case.
-          - ``raw`` may be ``{"result": [<entry>, <entry>, ...]}`` or
+ - ``raw`` may be ``{"result": [<entry>, <entry>, ...]}`` or
             ``{"results": [...]}`` per docs sections; we accept either.
-          - Each entry, on success, exposes ``order_id``; on failure, a
+ - Each entry, on success, exposes ``order_id``; on failure, a
             ``code``/``message``.
 
         Falls back to client_order_id when the server didn't return a

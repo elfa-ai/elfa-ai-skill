@@ -67,7 +67,7 @@ def _fail_pair(error: str) -> dict:
 def _fire(*, event_id, query_id, registry, executor, alerts, config,
           raw=None):
     """Convenience: call _process_fire with a synthesized SSE payload."""
-    raw = raw or json.dumps({"queryId": query_id, "executionId": event_id})
+    raw = raw or json.dumps({"queryId": query_id, "eventId": event_id})
     _process_fire(event_id, query_id, raw, registry, executor, alerts, config)
 
 
@@ -359,35 +359,25 @@ async def test_strategy_loop_processes_canonical_sse_event(tmp_path):
     executor.place_entry_with_tpsl.assert_called_once()
 
 
-async def test_strategy_loop_recurring_status_treated_as_live(tmp_path):
-    """`recurring` is a live status per the documented Auto state set.
-    Treating it as terminal would tear down recurring queries after the
-    first fire. The loop must keep iterating until status is in the
-    documented terminal set."""
+async def test_strategy_loop_recurring_remote_status_is_treated_as_terminal(tmp_path):
+    """This bot is single-fire by design and does NOT support recurring
+    queries. If poll-query reports `recurring`, treat as terminal-unknown:
+    sync local status to `failed` and warn the user; do not try to keep
+    a stream open across multiple fires."""
     cfg, registry, executor, _, alerts = _setup(tmp_path, strategy=_strategy())
     fake = _FakeElfa(
         query_states={"q_abc": [
             {"queryId": "q_abc", "status": "recurring",
              "latestEvaluation": None, "executions": []},
-            # After SSE close, poll shows triggered -> loop exits.
-            {"queryId": "q_abc", "status": "triggered",
-             "latestEvaluation": None, "executions": []},
         ]},
-        sse_events_by_query={"q_abc": [
-            {"event_id": "evt_rec",
-             "data": {"eventType": "query.triggered",
-                      "eventId": "evt_rec",
-                      "queryId": "q_abc"}},
-        ]},
+        sse_events_by_query={},
     )
     await _strategy_loop(
         "q_abc", config=cfg, registry=registry, elfa=fake,
         executor=executor, alerts=alerts,
     )
-    # Should have actually processed the SSE event because recurring is live.
-    fire = registry.get_fire("evt_rec")
-    assert fire is not None
-    assert fire["outcome"] == "placed"
+    assert registry.get_strategy("q_abc").status == "failed"
+    executor.place_entry_with_tpsl.assert_not_called()
 
 
 async def test_strategy_loop_offline_trigger_emits_manual_intervention(tmp_path):
@@ -478,10 +468,10 @@ async def test_strategy_loop_expiry_emits_info_not_warning(tmp_path):
     assert terminated[0]["severity"] == "info"
 
 
-async def test_strategy_loop_failed_status_handled(tmp_path):
-    """`failed` is one of the documented terminal statuses. The loop must
-    reconcile it (mark local strategy `failed`, warning alert) rather than
-    looping forever."""
+async def test_strategy_loop_failed_status_emits_error_alert(tmp_path):
+    """`failed` is terminal-with-error per the docs. Alert severity is
+    `error` (not just `warning`) because the user typically needs to
+    investigate why Auto rejected the query."""
     cfg, registry, executor, sender, alerts = _setup(
         tmp_path, strategy=_strategy(),
     )
@@ -501,7 +491,56 @@ async def test_strategy_loop_failed_status_handled(tmp_path):
     terminated = [a for a in pending
                   if a["category"] == "strategy_terminated_remotely"]
     assert len(terminated) == 1
-    assert terminated[0]["severity"] == "warning"
+    assert terminated[0]["severity"] == "error"
+
+
+async def test_strategy_loop_unknown_status_marks_failed(tmp_path):
+    """Anything outside the documented status set is treated as failed
+    (not silently mapped to cancelled). Surfaces a warning log + alert."""
+    cfg, registry, executor, _, alerts = _setup(tmp_path, strategy=_strategy())
+    fake = _FakeElfa(
+        query_states={"q_abc": [
+            {"queryId": "q_abc", "status": "this_status_does_not_exist",
+             "latestEvaluation": None, "executions": []},
+        ]},
+        sse_events_by_query={},
+    )
+    await _strategy_loop(
+        "q_abc", config=cfg, registry=registry, elfa=fake,
+        executor=executor, alerts=alerts,
+    )
+    assert registry.get_strategy("q_abc").status == "failed"
+
+
+async def test_strategy_loop_offline_trigger_alerts_only_if_no_local_fire(tmp_path):
+    """If the bot already saw the SSE fire live (so `fires` has a row), the
+    next poll sees remote=triggered + executions but must NOT emit a
+    'receiver disconnected' alert. The fire was handled live; any
+    follow-up alert was already emitted by _process_fire."""
+    cfg, registry, executor, _, alerts = _setup(tmp_path, strategy=_strategy())
+    # Pre-seed a live fire that we already processed.
+    registry.insert_fire_if_new(
+        event_id="evt_live", query_id="q_abc", received_at=1,
+        outcome="placed", raw_payload="{}",
+    )
+    fake = _FakeElfa(
+        query_states={"q_abc": [
+            {"queryId": "q_abc", "status": "triggered",
+             "latestEvaluation": None,
+             "executions": [{"id": "exec_xxx", "queryId": "q_abc",
+                             "type": "notify", "status": "success",
+                             "createdAt": "2026-05-12T10:00:00Z"}]},
+        ]},
+        sse_events_by_query={},
+    )
+    await _strategy_loop(
+        "q_abc", config=cfg, registry=registry, elfa=fake,
+        executor=executor, alerts=alerts,
+    )
+    pending = registry.list_alerts(only_unacked=True)
+    assert not any(
+        a["category"] == "manual_intervention_required" for a in pending
+    )
 
 
 async def test_strategy_loop_live_sse_fire_no_extra_terminated_alert(tmp_path):
@@ -548,3 +587,85 @@ async def test_strategy_loop_live_sse_fire_no_extra_terminated_alert(tmp_path):
     assert not any(
         a["category"] == "manual_intervention_required" for a in pending
     )
+
+
+# ---------------------------------------------------------------------------
+# Supervisor: task lifecycle (spawn / cancel-on-leave / reap)
+# ---------------------------------------------------------------------------
+
+
+from elfa_grvt_bot.receiver import supervisor
+
+
+async def test_supervisor_cancels_task_when_strategy_leaves_active(tmp_path):
+    """If a strategy transitions from active to a terminal local status
+    (CLI cancel, or live SSE fire that marked it fired), the supervisor
+    must cancel its SSE task on the next reconcile cycle. Without this
+    the task lingers, holds the SSE connection, and may keep retrying
+    a stream that no longer corresponds to anything we care about."""
+    cfg, registry, executor, _, alerts = _setup(tmp_path, strategy=_strategy())
+
+    stream_cancelled = asyncio.Event()
+
+    class _LiveElfa:
+        def get_query(self, query_id):
+            return {"queryId": query_id, "status": "active", "executions": []}
+
+        async def stream_notifications(self, query_id):
+            try:
+                # Stay open forever to model a live SSE connection.
+                while True:
+                    await asyncio.sleep(3600)
+                    yield {}
+            except asyncio.CancelledError:
+                stream_cancelled.set()
+                raise
+
+    fake = _LiveElfa()
+    stop = asyncio.Event()
+    sup_task = asyncio.create_task(supervisor(
+        config=cfg, registry=registry, elfa=fake,
+        executor=executor, alerts=alerts,
+        poll_interval=0.01, stop=stop,
+    ))
+    # Let the supervisor spawn the SSE task.
+    await asyncio.sleep(0.05)
+    # Now transition the strategy out of active. Supervisor should cancel.
+    registry.set_strategy_status("q_abc", "cancelled")
+    await asyncio.sleep(0.1)
+    stop.set()
+    await sup_task
+    assert stream_cancelled.is_set()
+
+
+async def test_supervisor_picks_up_newly_registered_strategy(tmp_path):
+    """A strategy authored while the supervisor is running must get an
+    SSE task spawned on the next poll cycle, not require a restart."""
+    cfg, registry, executor, _, alerts = _setup(tmp_path)  # no strategy yet
+
+    spawned_for: list[str] = []
+
+    class _LiveElfa:
+        def get_query(self, query_id):
+            return {"queryId": query_id, "status": "active", "executions": []}
+
+        async def stream_notifications(self, query_id):
+            spawned_for.append(query_id)
+            await asyncio.sleep(3600)
+            if False:
+                yield {}
+
+    fake = _LiveElfa()
+    stop = asyncio.Event()
+    sup_task = asyncio.create_task(supervisor(
+        config=cfg, registry=registry, elfa=fake,
+        executor=executor, alerts=alerts,
+        poll_interval=0.01, stop=stop,
+    ))
+    # Author a strategy mid-flight.
+    await asyncio.sleep(0.03)
+    registry.insert_strategy(_strategy(query_id="q_new"))
+    await asyncio.sleep(0.05)
+    stop.set()
+    await sup_task
+    assert "q_new" in spawned_for

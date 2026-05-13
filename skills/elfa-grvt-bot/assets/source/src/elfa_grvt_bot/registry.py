@@ -241,20 +241,23 @@ class Registry:
                 raise KeyError(f"no fire row with event_id={event_id!r}")
 
     def get_fire(self, event_id: str) -> Optional[dict]:
-        """
-        Return the fire row as a dict, or None if not found.
-
-        Deliberately returns dict (not a Fire dataclass): fires are read mostly
-        for triage/debugging, and the receiver only uses insert_fire_if_new's
-        bool return value for idempotency. If a future caller needs typed
-        access (e.g., a list_fires admin command), introduce a Fire dataclass
-        then , not now (YAGNI).
-        """
+        """Return the fire row as a dict, or None if not found."""
         with self._connect() as con:
             row = con.execute(
                 "SELECT * FROM fires WHERE event_id = ?", (event_id,)
             ).fetchone()
             return dict(row) if row else None
+
+    def count_fires_for_query(self, query_id: str) -> int:
+        """Number of fire rows recorded for a query. Used by the terminal-
+        status reconciler to detect whether we already saw the trigger
+        live (in which case we did NOT miss it during a disconnect)."""
+        with self._connect() as con:
+            row = con.execute(
+                "SELECT COUNT(*) AS n FROM fires WHERE query_id = ?",
+                (query_id,),
+            ).fetchone()
+            return int(row["n"]) if row else 0
 
     def insert_alert(
         self,

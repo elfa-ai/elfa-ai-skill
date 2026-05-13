@@ -3,8 +3,6 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 
-VALID_GRVT_ENVS = {"testnet", "prod", "staging", "dev"}
-
 
 @dataclass(frozen=True)
 class Config:
@@ -13,11 +11,8 @@ class Config:
     grvt_private_key: str
     grvt_trading_account_id: str
     grvt_env: str
-    # Telegram is optional: both fields default to empty strings. When either
-    # is empty TelegramSender / AlertWriter silently skip the push, and alerts
-    # stay in-chat via the registry. Bootstrap.py and setup.md both document
-    # this; Config.load must agree or the receiver crashes on first start for
-    # users who opted out.
+    # Telegram is optional: empty strings disable the push channel; alerts
+    # still land in the in-chat registry.
     telegram_bot_token: str
     telegram_chat_id: str
     registry_db_path: str
@@ -31,9 +26,10 @@ class Config:
             return v
 
         grvt_env = os.environ.get("GRVT_ENV", "prod")
-        if grvt_env not in VALID_GRVT_ENVS:
+        if grvt_env != "prod":
             raise ValueError(
-                f"GRVT_ENV must be one of {sorted(VALID_GRVT_ENVS)}, got: {grvt_env!r}"
+                f"GRVT_ENV must be 'prod' (this bot is prod-only by design; "
+                f"see references/setup.md). got: {grvt_env!r}"
             )
 
         return cls(

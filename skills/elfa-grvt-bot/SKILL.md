@@ -39,22 +39,22 @@ When this skill is triggered for setup ("install the bot", "get this running", "
 
 > Setting up the elfa-grvt-bot. Here's the plan:
 >
-> 1. **Gather credentials** — Elfa API key, GRVT API key + private key + trading account ID, optionally Telegram bot token + chat ID. (You'll paste these into chat; I won't echo them back.)
-> 2. **Bootstrap install** — copy source, create venv, install deps, run tests, validate .env. (Mostly automated; ~1-2 min.)
-> 3. **Start the receiver** — `python -m elfa_grvt_bot`; the supervisor opens SSE streams for each active strategy automatically.
-> 4. **Verify end to end** — smoke test, optionally ping Telegram.
+> 1. **Gather credentials** - Elfa API key, GRVT API key + private key + trading account ID, optionally Telegram bot token + chat ID. (You'll paste these into chat; I won't echo them back.)
+> 2. **Bootstrap install** - copy source, create venv, install deps, run tests, validate .env. (Mostly automated; ~1-2 min.)
+> 3. **Start the receiver** - `python -m elfa_grvt_bot`; the supervisor opens SSE streams for each active strategy automatically.
+> 4. **Verify end to end** - smoke test, optionally ping Telegram.
 >
 > I'll mark each milestone as we go. First up: credentials.
 
-**At each milestone**, post a short progress callout so the user always knows where they are. Use round-number percentages keyed to the 4 milestones above (25% / 50% / 75% / 100%) — not the internal bootstrap phases. Examples:
+**At each milestone**, post a short progress callout so the user always knows where they are. Use round-number percentages keyed to the 4 milestones above (25% / 50% / 75% / 100%) - not the internal bootstrap phases. Examples:
 
-> Credentials saved. **(25% complete — bootstrap install next, ~1-2 min.)**
+> Credentials saved. **(25% complete - bootstrap install next, ~1-2 min.)**
 
-> Bootstrap exited clean, dependencies installed, env validated. **(50% complete — starting the receiver.)**
+> Bootstrap exited clean, dependencies installed, env validated. **(50% complete - starting the receiver.)**
 
-> Receiver running (`pgrep -f elfa_grvt_bot` confirms). **(75% complete — final end-to-end check.)**
+> Receiver running (`pgrep -f elfa_grvt_bot` confirms). **(75% complete - final end-to-end check.)**
 
-> All checks passed. **(100% — ready.)**
+> All checks passed. **(100% - ready.)**
 
 If something fails and you have to retry, say so explicitly ("hit a snag on the install - retrying, still around 50%") rather than silently looping. Bootstrap itself prints `[N% complete] phase X/6: ...` banners - feel free to surface those raw if it speeds things up, but the user-facing percentages above are the ones to lead with.
 
@@ -196,7 +196,7 @@ The user needs:
 | `TELEGRAM_BOT_TOKEN` | OPTIONAL. `@BotFather` on Telegram (`/newbot`) |
 | `TELEGRAM_CHAT_ID` | OPTIONAL. Send your bot any message, then `curl https://api.telegram.org/bot<token>/getUpdates` and read `result[0].message.chat.id` |
 
-**Important detail**: as of 2026-05-08 Elfa's `/v2/auto/*` mutations no longer require HMAC signing — API-key auth alone is sufficient. `ELFA_API_KEY` is the only Elfa secret needed. See `references/elfa-sse.md`.
+**Auth detail**: per `docs.elfa.ai/api/rest/auto-create-query-v-2`, HMAC signing on `/v2/auto/queries` is conditional - required for trade-flavoured actions (`market_order`, `limit_order`, or `llm` callbacks to them), not required for notification-only actions (`notify`, `telegram_bot`, `webhook`, or `llm` callbacks to those). This bot only creates notify-style queries (the authoring flow always prepends `Notify me when:` so Builder Chat emits notify actions), so `ELFA_API_KEY` is the only Elfa secret needed. Streaming and validate are always API-key-only.
 
 ### Step 4: Populate `.env` and re-run bootstrap
 
@@ -219,8 +219,8 @@ Run the smoke test in `assets/source/docs/SMOKE_TEST.md`. It opens a tiny ($5+ n
 When an agent session is opened in the user's working directory, the project's generated `AGENTS.md` drives the authoring flow. At a high level, when the user describes a strategy in chat:
 
 1. Read pending alerts first (`python src/registry_cli.py alerts --pending`). Surface any unacked alerts at the top of the response.
-2. Forward the user's description to Elfa Builder Chat (`POST /v2/auto/chat`, body field `message`, API-key auth). **Always** frame the user's description as `Notify me when: <description>` so Builder Chat emits a notify-style action (never an execute/trade action). Pass Builder Chat's full response (conditions AND actions) through to `POST /v2/auto/queries` **unchanged** — do not strip or replace the actions block, and never hand-write or hand-edit the `conditions` block. Builder Chat is the only authority for EQL: if its conditions don't match the user's intent, re-prompt Builder Chat or ask the user to rephrase; do not edit the JSON yourself. The actions emitted by Builder Chat (`notify`, `telegram_bot`, etc.) are irrelevant because the receiver consumes triggers via SSE on the query's `id`, not via the actions block.
-3. Ask the user for any GRVT order params they did not volunteer: symbol (verify via `GrvtCcxt.fetch_market(symbol)` from the grvt-trading skill before continuing — if it raises, tell the user "GRVT doesn't have that token" and stop), size, order type, optional limit price, optional leverage, optional time-in-force, `max_notional_usd` cap, optional `tp_pct` and `sl_pct`.
+2. Forward the user's description to Elfa Builder Chat (`POST /v2/auto/chat`, body field `message`, API-key auth). **Always** frame the user's description as `Notify me when: <description>` so Builder Chat emits a notify-style action (never an execute/trade action). The response shape is `{sessionId, response, title, reasoning, planIds}` per `docs.elfa.ai/api/rest/auto-chat-v-2`; `response` is markdown text with the EQL embedded in a fenced JSON code block. **Extract that JSON block verbatim** and pass it as the `query` field of the `POST /v2/auto/queries` body (alongside `title`/`description` taken from Builder Chat's `title` or the user's intent). Never hand-write or hand-edit the `conditions` block. If Builder Chat's draft doesn't match the user's intent, re-prompt with `sessionId` set for context, or ask the user to rephrase; do not patch the JSON yourself. The actions emitted by Builder Chat (`notify`, `telegram_bot`, etc.) are irrelevant for execution because this bot consumes triggers via SSE on the query's id, not via the actions block - but pass them through unchanged anyway.
+3. Ask the user for any GRVT order params they did not volunteer: symbol (verify via `GrvtCcxt.fetch_market(symbol)` from the grvt-trading skill before continuing - if it raises, tell the user "GRVT doesn't have that token" and stop), size, order type, optional limit price, optional leverage, optional time-in-force, `max_notional_usd` cap, optional `tp_pct` and `sl_pct`.
 4. Validate via `POST /v2/auto/queries/validate`.
 5. Show the full plan and wait for an explicit "yes".
 6. On approval, `POST /v2/auto/queries` with the validated body unchanged. Then `python src/registry_cli.py add ...` to register locally. The receiver's supervisor picks up the new strategy on its next poll (~5s) and opens an SSE stream for it automatically.
@@ -242,7 +242,7 @@ Specifics, defaults, and constraints are in `references/strategy-authoring.md`.
 |---|---|
 | `references/setup.md` | Detailed setup walkthrough; if the quick start above is insufficient |
 | `references/elfa-eql.md` | Understanding EQL returned by Builder Chat (operators, condition sources, depth limits). The agent never authors EQL; this is a read-only reference. |
-| `references/elfa-sse.md` | SSE stream details: event format, `executionId` dedupe key, single-fire semantics, REST backfill path |
+| `references/elfa-sse.md` | SSE stream details: canonical event format, `eventId` dedupe key, single-fire semantics, poll-query status reconciliation |
 | `references/grvt-api.md` | OTOCO via `full/v2/bulk_orders`, EIP-712 signing, deprecated endpoints, tick alignment |
 | `references/strategy-authoring.md` | The full chat flow when a user describes a strategy |
 | `references/troubleshooting.md` | Common errors and what they mean |

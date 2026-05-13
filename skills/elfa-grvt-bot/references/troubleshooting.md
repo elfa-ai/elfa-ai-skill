@@ -6,7 +6,7 @@ Common errors and what they mean, organized by where they surface.
 
 ### `elfa create_query failed: 401 Unauthorized`
 
-`ELFA_API_KEY` is wrong, expired, or missing. Re-copy from the Elfa developer portal (no leading/trailing whitespace). Note that historical "Invalid HMAC signature" errors no longer apply: as of 2026-05-08, Elfa accepts API-key auth alone.
+`ELFA_API_KEY` is wrong, expired, or missing. Re-copy from the Elfa developer portal (no leading/trailing whitespace). HMAC is not required for this bot because it only creates notify-style queries; if you see an HMAC error you have likely modified the authoring flow to emit a trade-flavoured action, which violates the project's notify-only rule.
 
 ### `elfa cancel_query failed: 409 Query must be cancelled before deletion`
 
@@ -53,13 +53,13 @@ On restart the supervisor calls `GET /v2/auto/queries/:id` (poll-query) for each
 
 The query no longer exists on Elfa's side (was hard-deleted). The supervisor will observe a non-`active` status on the next REST check and stop the per-strategy task automatically. No action required unless the strategy should be replaced.
 
-### Stream closes without a notification event
+### Stream closes without a trigger event
 
-Normal behavior. A query stream emits at most one `notification` event (the trigger), then `event: end`, and the server closes the connection. If the condition hasn't fired yet, the stream may stay open for a long time and then close on the server's schedule. The supervisor re-opens it on the next reconcile loop.
+Normal behavior. A query stream emits one or more `query.triggered` events (canonical per `docs.elfa.ai/auto/notifications`) while the condition holds, then closes. If the condition hasn't fired yet, the stream may stay open for a long time and then close on the server's schedule. After a no-event close, `_strategy_loop` sleeps briefly (default 5s) before re-opening, so a server that closes idle streams aggressively will not trigger a reconnect storm.
 
 ### Stream disconnects with a network error
 
-Expected on flaky networks. The per-strategy `_strategy_loop` catches `httpx.HTTPError` and `ConnectionError`, logs a warning, and retries with exponential backoff (initial 2s, max 60s). During the gap, any fires that landed are picked up by the REST backfill on reconnect.
+Expected on flaky networks. The per-strategy `_strategy_loop` catches `httpx.HTTPError`, `ConnectionError`, and `ElfaStreamError`, logs a warning, and retries with exponential backoff (initial 2s, max 60s). Fires that landed during the gap are NOT auto-recovered (SSE `eventId` and poll `executions[i].id` are different identifier namespaces per the docs); if poll-query subsequently reports terminal status with executions, the bot emits `manual_intervention_required` so the user reviews GRVT manually.
 
 ### Nothing in the logs after "supervisor started"
 

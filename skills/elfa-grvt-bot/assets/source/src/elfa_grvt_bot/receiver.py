@@ -1,14 +1,18 @@
 """Receiver: pulls trigger events from Elfa Auto via per-query SSE streams.
 
-Single asyncio supervisor maintains one SSE consumer per active strategy in
-the local registry. On stream close or disconnect, it polls
-`GET /v2/auto/queries/:id` for status reconciliation only - executions on
-the poll-query response use a different identifier namespace
-(`executions[i].id` = `exec_xxx`) than SSE events (`eventId` = `evt_xxx`),
-so we cannot dedupe missed fires across the two channels. Live SSE is the
-sole order-placement path; if the receiver was offline when a trigger
-fired, the strategy is reported as remotely-terminated via an in-chat
-alert so the user can review on the exchange manually.
+Single-fire by design: each strategy authors a query, the live SSE
+delivers one fire, the bot places the OTOCO order on GRVT, the local
+strategy transitions `active -> fired`, and the SSE task exits. There is
+no order-replay path: if the receiver was offline when Elfa fired, the
+user gets a `manual_intervention_required` alert via the poll-query
+status check on next start. Recurring queries are not supported by this
+bot (the authoring flow forbids them).
+
+Why poll-query is status-only:
+  SSE `eventId` (evt_xxx) and poll-query `executions[i].id` (exec_xxx)
+  are different identifier namespaces per docs.elfa.ai/auto/notifications
+  and docs.elfa.ai/api/rest/auto-poll-query-v-2. Cross-channel dedupe
+  is unsafe.
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ import httpx
 
 from .alerts import AlertWriter
 from .config import Config
+from .elfa_client import ElfaStreamError
 from .guardrails import Allow, Reject, check_guardrails
 from .grvt_executor import GrvtError
 from .registry import Registry, Strategy
@@ -47,9 +52,11 @@ class _ElfaClient(Protocol):
     async def stream_notifications(self, query_id: str): ...  # AsyncIterator[dict]
 
 
-# ---------------------------------------------------------------------------
-# Supervisor: one SSE consumer per active strategy
-# ---------------------------------------------------------------------------
+# Documented Auto status set (docs.elfa.ai/auto/agent-quickstart,
+# v-2-auto.tag.mdx). `recurring` is documented as live but not supported
+# by this single-fire bot; the authoring flow rejects it.
+_LIVE_STATUSES = {"active"}
+_TERMINAL_STATUSES = {"triggered", "expired", "cancelled", "failed"}
 
 
 async def supervisor(
@@ -62,10 +69,12 @@ async def supervisor(
     poll_interval: float = 5.0,
     stop: Optional[asyncio.Event] = None,
 ) -> None:
-    """Long-running supervisor. Spawns a per-strategy SSE task for each
-    `active` row in the local registry. Reconciles every `poll_interval`
-    seconds so newly-added strategies get picked up without restart.
-    Exits cleanly when `stop` is set.
+    """Reconcile local `active` strategies against running SSE tasks.
+
+    On each poll: spawn tasks for newly-active strategies; cancel tasks
+    whose strategy is no longer locally active (cancelled via CLI, or
+    transitioned to `fired` by a live SSE event handled inside the task);
+    reap finished tasks. Exits when `stop` is set.
     """
     tasks: dict[str, asyncio.Task] = {}
     stop = stop or asyncio.Event()
@@ -74,7 +83,7 @@ async def supervisor(
         while not stop.is_set():
             try:
                 active = registry.list_strategies(status="active")
-            except Exception:  # noqa: BLE001 - registry read should never crash supervisor
+            except Exception:
                 logger.exception("registry list failed; will retry")
                 await _wait_or_stop(stop, poll_interval)
                 continue
@@ -92,9 +101,15 @@ async def supervisor(
                     name=f"sse-{qid[:8]}",
                 )
 
+            for qid in set(tasks) - active_qids:
+                if not tasks[qid].done():
+                    logger.info("cancelling SSE task for %s (no longer active)", qid)
+                    tasks[qid].cancel()
+
             for qid in list(tasks):
-                if tasks[qid].done():
-                    exc = tasks[qid].exception()
+                t = tasks[qid]
+                if t.done():
+                    exc = t.exception() if not t.cancelled() else None
                     if exc is not None:
                         logger.error("strategy loop %s exited with %r", qid, exc)
                     else:
@@ -120,10 +135,6 @@ async def _wait_or_stop(stop: asyncio.Event, secs: float) -> None:
         pass
 
 
-_LIVE_STATUSES = {"active", "recurring"}
-_TERMINAL_STATUSES = {"triggered", "expired", "cancelled", "failed"}
-
-
 async def _strategy_loop(
     query_id: str,
     *,
@@ -134,49 +145,61 @@ async def _strategy_loop(
     alerts: AlertWriter,
     backoff_initial: float = 2.0,
     backoff_max: float = 60.0,
+    idle_close_backoff: float = 5.0,
 ) -> None:
-    """One iteration per (re)connect attempt. On terminal Elfa-side status
-    (per the documented set: `triggered` / `expired` / `cancelled` /
-    `failed`), reconcile the local registry status and exit. `recurring`
-    is treated as live (re-opens SSE the same as `active`).
+    """Per-strategy loop. Poll-query for status, then open SSE.
+
+    Exits when:
+ - remote status is terminal (sync local + alert)
+ - local strategy is no longer `active` (e.g. SSE fire transitioned
+        to `fired`, or user cancelled via CLI)
+ - poll-query returns 404 (query no longer exists remotely)
+ - cancelled by the supervisor
     """
     loop = asyncio.get_running_loop()
     backoff = backoff_initial
     while True:
-        # 1. Poll query for status reconciliation. We do NOT use the
-        #    `executions` array for fire dedupe: executions[i].id is in a
-        #    different identifier namespace (`exec_xxx`) than SSE events
-        #    (`eventId` = `evt_xxx`), per the documented schemas. Cross-
-        #    channel dedupe would silently double-fire or miss entirely.
+        local = await loop.run_in_executor(None, registry.get_strategy, query_id)
+        if local is None or local.status != "active":
+            return
+
         try:
             query_state = await loop.run_in_executor(None, elfa.get_query, query_id)
-        except Exception as e:  # noqa: BLE001
+        except Exception as e:
+            status_code = _status_code_of(e)
+            if status_code == 404:
+                await _sync_terminal_status_locally(
+                    query_id, remote_status="cancelled",
+                    executions=[], registry=registry, alerts=alerts,
+                    reason="query no longer exists on Elfa (404)",
+                )
+                return
             logger.warning("poll-query failed for %s: %r", query_id, e)
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, backoff_max)
             continue
 
+        backoff = backoff_initial
         remote_status = query_state.get("status") or "unknown"
+        executions = query_state.get("executions") or []
+
         if remote_status not in _LIVE_STATUSES:
-            # Terminal (or unknown) status. Sync to local registry and
-            # surface a visible alert if executions occurred while the
-            # receiver was offline. Order placement is owned by the live
-            # SSE path only; if a trigger fired while we were down, the
-            # user is told to review manually rather than us guessing.
-            had_executions = bool(query_state.get("executions"))
             await _sync_terminal_status_locally(
                 query_id, remote_status,
-                had_executions=had_executions,
-                registry=registry, alerts=alerts,
+                executions=executions, registry=registry, alerts=alerts,
             )
-            return  # done with this strategy
+            return
 
-        # 2. Open SSE. The iterator naturally exits when the stream closes
-        #    (after a fire, or on connection error). On exit we loop back to
-        #    step 1 which either backfills (terminal) or reconnects (active).
+        yielded_event = False
         try:
             async for ev in elfa.stream_notifications(query_id):
-                event_id = ev.get("event_id") or "unknown"
+                yielded_event = True
+                event_id = ev.get("event_id")
+                if not event_id:
+                    logger.warning(
+                        "skipping SSE event with no event_id for %s", query_id
+                    )
+                    continue
                 payload = ev.get("data") or {}
                 raw_payload = json.dumps(payload)
                 await loop.run_in_executor(
@@ -185,100 +208,141 @@ async def _strategy_loop(
                     event_id, query_id, raw_payload,
                     registry, executor, alerts, config,
                 )
-                backoff = backoff_initial
+        except ElfaStreamError as e:
+            if e.status_code == 404:
+                await _sync_terminal_status_locally(
+                    query_id, remote_status="cancelled",
+                    executions=[], registry=registry, alerts=alerts,
+                    reason="query no longer exists on Elfa (404)",
+                )
+                return
+            logger.warning("SSE stream error for %s: %r; backoff %.1fs",
+                           query_id, e, backoff)
+            await asyncio.sleep(backoff)
+            backoff = min(backoff * 2, backoff_max)
+            continue
         except (httpx.HTTPError, ConnectionError) as e:
             logger.warning("SSE transport error for %s: %r; backoff %.1fs",
                            query_id, e, backoff)
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, backoff_max)
+            continue
         except asyncio.CancelledError:
             raise
-        except Exception:  # noqa: BLE001
+        except Exception:
             logger.exception("unexpected error in SSE iteration for %s", query_id)
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, backoff_max)
+            continue
+
+        if not yielded_event:
+            await asyncio.sleep(idle_close_backoff)
+
+
+def _status_code_of(exc: BaseException) -> Optional[int]:
+    """Best-effort: extract an HTTP status code from an exception so the
+    loop can branch on 404 (gone) vs 401 (auth) vs 5xx (transient). The
+    ElfaClient REST helpers raise RuntimeError(\"... <code> ...\"), so we
+    parse the prefix."""
+    msg = str(exc)
+    for code in (404, 410, 401, 403):
+        if f" {code} " in msg or msg.endswith(f" {code}"):
+            return code
+    return None
 
 
 async def _sync_terminal_status_locally(
     query_id: str,
     remote_status: str,
     *,
-    had_executions: bool,
+    executions: list,
     registry: Registry,
     alerts: AlertWriter,
+    reason: Optional[str] = None,
 ) -> None:
-    """Reconcile a remote-side terminal status against the local registry.
+    """Sync a terminal remote status to the local registry and emit one alert.
 
-    The supervisor polls `list_strategies(status='active')` every ~5s, so a
-    strategy whose Elfa-side status flipped to a terminal value outside our
-    flow (e.g. user clicked Cancel in the Elfa UI, or Auto's expiresIn
-    elapsed) would otherwise keep getting an SSE task re-spawned that
-    exits immediately. Sync the status locally and surface an alert.
-
-    When `had_executions` is True, the strategy fired at least once while
-    we were not connected via SSE. Because executions[i].id and SSE
-    eventId are different identifier spaces we cannot dedupe across
-    channels (see module docstring), so we emit a manual-review alert
-    rather than re-firing the order placement path.
+    Suppresses the alert if the local strategy already transitioned to a
+    terminal state (which means a live SSE fire was handled by
+    `_process_fire` and the alerts pipeline already surfaced it).
     """
     loop = asyncio.get_running_loop()
     local = await loop.run_in_executor(None, registry.get_strategy, query_id)
-    if local is None:
-        return  # not registered locally, nothing to sync
-    if local.status != "active":
-        # Already in a terminal state locally. Live SSE may have already
-        # transitioned active -> fired via `_process_fire`; don't overwrite.
+    if local is None or local.status != "active":
         return
 
-    # Map Elfa's terminal vocabulary to our registry vocabulary. The
-    # documented Auto status set is {active, recurring, triggered, expired,
-    # cancelled, failed}. We only reach here for the non-live members.
-    local_status = {
+    local_status_map = {
         "triggered": "fired",
         "expired": "expired",
         "cancelled": "cancelled",
         "failed": "failed",
-    }.get(remote_status, "cancelled")
+    }
+    if remote_status in local_status_map:
+        local_status = local_status_map[remote_status]
+    else:
+        local_status = "failed"
+        logger.warning(
+            "unrecognized remote status %r for %s; treating as failed",
+            remote_status, query_id,
+        )
 
     try:
         await loop.run_in_executor(
             None,
             lambda: registry.set_strategy_status(query_id, local_status),
         )
-    except Exception:  # noqa: BLE001
+    except Exception:
         logger.exception("failed to sync terminal status for %s", query_id)
         return
 
+    had_executions = bool(executions)
     if had_executions and remote_status == "triggered":
-        # The strategy triggered at least once while the receiver wasn't
-        # connected via SSE. We can't safely replay it as a fire because
-        # the execution id namespace doesn't align with our SSE-keyed
-        # `fires` table, and we'd risk double-placing on GRVT. Tell the
-        # user to reconcile manually.
+        local_fires = await loop.run_in_executor(
+            None, registry.count_fires_for_query, query_id
+        )
+        if local_fires == 0:
+            alerts.emit(
+                severity="error",
+                category="manual_intervention_required",
+                message=(
+                    f"strategy triggered on Elfa while receiver was disconnected. "
+                    "Order was NOT placed by the bot. Review the position on "
+                    f"GRVT and decide whether to enter manually. "
+                    f"Remote status: {remote_status!r}, local status now: {local_status!r}."
+                ),
+                query_id=query_id,
+                details={"executions": executions[:10]},
+            )
+            return
+        # Live SSE already delivered the fire; _process_fire produced the
+        # canonical alerts (order_placed / guardrail_rejected / etc). Don't
+        # double-alert.
+        return
+
+    if remote_status == "failed":
         alerts.emit(
             severity="error",
-            category="manual_intervention_required",
+            category="strategy_terminated_remotely",
             message=(
-                f"strategy triggered on Elfa while receiver was disconnected. "
-                "Order was NOT placed by the bot. Review the position on "
-                f"GRVT and decide whether to enter manually. Remote status: "
-                f"{remote_status!r}, local status now: {local_status!r}."
+                f"strategy failed on Elfa. local status set to {local_status!r}. "
+                f"Reason: {reason or 'see executions'}."
             ),
             query_id=query_id,
+            details={"executions": executions[:10]} if had_executions else None,
         )
         return
 
-    # No fires to surface. Severity tracks how surprising the terminal
-    # state is: expired = expected lifecycle, cancelled/failed = worth
-    # surfacing but not order-placement-critical.
     severity = "info" if remote_status == "expired" else "warning"
+    msg = (
+        f"strategy ended with remote status {remote_status!r}. "
+        f"local status set to {local_status!r}."
+    )
+    if reason:
+        msg = f"{msg} {reason}"
     alerts.emit(
         severity=severity,
         category="strategy_terminated_remotely",
-        message=(
-            f"strategy ended with remote status {remote_status!r} "
-            f"(no fires recorded). local status set to {local_status!r}."
-        ),
+        message=msg,
         query_id=query_id,
     )
 
@@ -345,7 +409,7 @@ def _process_fire_inner(
         raw_payload=raw_payload,
     )
     if not inserted:
-        logger.info("duplicate event %s , skipped", event_id)
+        logger.info("duplicate event %s, skipped", event_id)
         return
 
     strategy: Optional[Strategy] = (
@@ -370,10 +434,8 @@ def _process_fire_inner(
         logger.info("rejecting fire for non-active strategy: %s", reason)
         return
 
-    # IMMEDIATE Telegram ping: dispatched in a daemon thread so it runs in
-    # parallel with set_leverage + place_entry_with_tpsl. Failures inside the
-    # thread are swallowed (already logged by AlertWriter); they must never
-    # affect order placement.
+    # Telegram ping in a daemon thread so it runs in parallel with order
+    # placement. Alert failures must never block trade execution.
     def _fire_trigger_alert() -> None:
         try:
             alerts.emit(

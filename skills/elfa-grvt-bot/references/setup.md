@@ -43,15 +43,15 @@ The full suite (around 100 tests) should pass. If a test fails, that is the firs
 1. Sign in at `https://go.elfa.ai/claude-skills`.
 2. Generate an API key. Copy it.
 
-You only need `ELFA_API_KEY`. All `/v2/auto/*` calls authenticate with this key alone (HMAC signing was removed in May 2026 after Elfa stopped requiring it). See `elfa-sse.md` for the trigger-delivery protocol.
+You only need `ELFA_API_KEY`. Per `docs.elfa.ai/api/rest/auto-create-query-v-2`, HMAC signing is conditional on action type: trade-flavoured actions (`market_order`, `limit_order`) require HMAC; notify-style actions (`notify`, `telegram_bot`, `webhook`) do not. This bot only creates notify-style queries (the authoring flow prepends `Notify me when:` before calling Builder Chat), so API-key auth is always sufficient. Stream + validate are always API-key-only. See `elfa-sse.md` for the trigger-delivery protocol.
 
 ### 4. Get GRVT credentials
 
 1. At `https://grvt.io`, navigate to Settings, then API Keys.
 2. Create a new API key. You will see three values:
-   - The API key string itself
-   - An EVM private key paired with this API key (used for EIP-712 order signing)
-   - A trading account ID (the sub-account this key is scoped to)
+ - The API key string itself
+ - An EVM private key paired with this API key (used for EIP-712 order signing)
+ - A trading account ID (the sub-account this key is scoped to)
 3. Copy all three.
 
 You need:

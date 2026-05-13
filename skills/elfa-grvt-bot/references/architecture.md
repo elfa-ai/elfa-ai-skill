@@ -30,7 +30,7 @@ High-level design of the elfa-grvt-bot.
    │  ELFA AUTO (managed condition engine)                 │
    │  evaluates conditions; exposes per-query SSE stream   │
    │  GET /v2/auto/queries/:id/stream  (notification fire) │
-   │  GET /v2/auto/queries/:id         (REST backfill)     │
+   │  GET /v2/auto/queries/:id         (poll, status only) │
    └───┬──────────────────────────────────────────────────┘
        │  outbound pull (SSE + REST)
        ▼
@@ -38,7 +38,7 @@ High-level design of the elfa-grvt-bot.
 │  RECEIVER (always-on outbound consumer)        │
 │  supervisor: polls registry every ~5s,         │
 │  spawns one async SSE task per active strategy │
-│  1. dedupe by executionId (INSERT OR IGNORE)   │
+│  1. dedupe by eventId (INSERT OR IGNORE)       │
 │  2. lookup strategy in registry                │
 │  3. silent status check                        │
 │  4. spawn Telegram alert in background         │
@@ -62,12 +62,12 @@ High-level design of the elfa-grvt-bot.
 | `config.py` | Read env vars; only place that touches `os.environ` |
 | `registry.py` | SQLite schema + CRUD for strategies, fires, alerts |
 | `guardrails.py` | Pure-function checks (notional cap, env match, status). Symbol existence is delegated to GRVT (fetch_mid_price/order placement). |
-| `telegram_sender.py` | Bot API send; never raises (only constructed when TELEGRAM_* are configured) |
+| `telegram_sender.py` | Bot API send; always constructed, but `send()` is a silent no-op when `TELEGRAM_BOT_TOKEN` or `TELEGRAM_CHAT_ID` is empty |
 | `alerts.py` | AlertWriter: registry insert (always) plus Telegram push (when configured) |
-| `elfa_client.py` | Thin client over `/v2/auto/*`: builder_chat, validate, create, cancel (API-key auth); `get_query` for REST backfill; `stream_notifications` async SSE consumer |
+| `elfa_client.py` | Thin client over `/v2/auto/*`: builder_chat, validate, create, cancel (API-key auth); `get_query` for status polling; `stream_notifications` async SSE consumer with fail-closed parser |
 | `grvt_executor.py` | High-level GRVT operations; wraps GrvtCcxt + trigger client |
 | `grvt_trigger_client.py` | Raw API for trigger orders + bulk_orders (OTOCO/OCO/OTO) |
-| `receiver.py` | `supervisor` + per-strategy `_strategy_loop` (SSE consumer + backfill) + `_process_fire` fire handler |
+| `receiver.py` | `supervisor` + per-strategy `_strategy_loop` (SSE consumer + status reconciliation) + `_process_fire` fire handler |
 | `__main__.py` | Production entrypoint: wires real clients, traps SIGINT/SIGTERM, runs `asyncio.run(supervisor(...))` |
 | `registry_cli.py` (top-level src) | CLI for add/list/cancel/alerts/ack |
 
@@ -76,20 +76,20 @@ High-level design of the elfa-grvt-bot.
 1. Auto evaluates condition; transitions to true.
 2. **Live SSE is the sole order-placement path.** The per-strategy task receives `event: query.triggered\ndata: <json>\n\n` on the open stream. The JSON carries `eventId` (canonical dedupe key per `docs.elfa.ai/auto/notifications`), `queryId`, `eventType`, `timestamp`, `channel`, `trigger`, `evaluation`, `action`. After emitting the trigger the stream closes (single-fire by design).
 3. Fire handler (`_process_fire`) runs:
-   - INSERT OR IGNORE into `fires` keyed by `eventId`. Duplicate -> no-op, return early.
-   - SELECT strategy by `query_id`. If missing, alert `unknown_strategy`, bail.
-   - If `strategy.status != 'active'`, log silently and bail (suppresses duplicate-fire noise).
-   - Spawn daemon thread to send `trigger_received` Telegram alert (non-blocking).
-   - Fetch `current_mid` via `executor.fetch_mid_price`.
-   - Run guardrails (`check_guardrails`).
-   - If `strategy.leverage` is set, call `executor.set_leverage` (best-effort).
-   - Call `executor.place_entry_with_tpsl(...)`. Internally:
-     - Compute TP/SL absolute prices from current_mid + percentages.
-     - Round to instrument tick_size.
-     - Build parent + TP + SL as Order dataclasses with EIP-712 signatures.
-     - POST to `https://trades.grvt.io/full/v2/bulk_orders` with `{sub_account_id, orders: [...]}`.
-   - On success: update `fires.outcome='placed'`, set `strategies.status='fired'`, emit `order_placed` and `tpsl_armed` alerts.
-   - On any error path: update `fires.outcome='grvt_error'`, emit categorized alert (`insufficient_margin`, `grvt_set_leverage`, `manual_intervention_required`, etc.).
+ - INSERT OR IGNORE into `fires` keyed by `eventId`. Duplicate -> no-op, return early.
+ - SELECT strategy by `query_id`. If missing, alert `unknown_strategy`, bail.
+ - If `strategy.status != 'active'`, log silently and bail (suppresses duplicate-fire noise).
+ - Spawn daemon thread to send `trigger_received` Telegram alert (non-blocking).
+ - Fetch `current_mid` via `executor.fetch_mid_price`.
+ - Run guardrails (`check_guardrails`).
+ - If `strategy.leverage` is set, call `executor.set_leverage` (best-effort).
+ - Call `executor.place_entry_with_tpsl(...)`. Internally:
+ - Compute TP/SL absolute prices from current_mid + percentages.
+ - Round to instrument tick_size.
+ - Build parent + TP + SL as Order dataclasses with EIP-712 signatures.
+ - POST to `https://trades.grvt.io/full/v2/bulk_orders` with `{sub_account_id, orders: [...]}`.
+ - On success: update `fires.outcome='placed'`, set `strategies.status='fired'`, emit `order_placed` and `tpsl_armed` alerts.
+ - On any error path: update `fires.outcome='grvt_error'`, emit categorized alert (`insufficient_margin`, `grvt_set_leverage`, `manual_intervention_required`, etc.).
 
 ## Strategy lifecycle
 
@@ -133,8 +133,8 @@ The three alerts a normal fire produces:
 
 Two delivery channels read from the registry:
 
-- **In-chat (via `AGENTS.md`).** Generated `AGENTS.md` instructs the agent to run `python src/registry_cli.py alerts --pending` on every session start and surface unacked alerts before doing anything else. After surfacing, the agent runs `python -m registry_cli ack all` to clear the queue. Agents that support session-start or per-prompt hooks can wire `scripts/show_pending_alerts.sh` for automatic injection — see your agent's docs.
-- **Telegram (optional, real-time push).** When configured, `AlertWriter.emit()` calls `telegram_sender.send()` synchronously after the registry write. When unconfigured, it is silently skipped — no error, no retry queue. Telegram exceptions never bubble up; they're logged as warnings so a flaky bot can't break order placement.
+- **In-chat (via `AGENTS.md`).** Generated `AGENTS.md` instructs the agent to run `python src/registry_cli.py alerts --pending` on every session start and surface unacked alerts before doing anything else. After surfacing, the agent runs `python -m registry_cli ack all` to clear the queue. Agents that support session-start or per-prompt hooks can wire `scripts/show_pending_alerts.sh` for automatic injection - see your agent's docs.
+- **Telegram (optional, real-time push).** When configured, `AlertWriter.emit()` calls `telegram_sender.send()` synchronously after the registry write. When unconfigured, it is silently skipped - no error, no retry queue. Telegram exceptions never bubble up; they're logged as warnings so a flaky bot can't break order placement.
 
 This dual design means the user always gets alerts in chat (free, no extra credentials), and optionally also gets push notifications on their phone for real-time visibility while away from the agent.
 
@@ -155,7 +155,7 @@ In layered order:
 1. Per-strategy `max_notional_usd` cap.
 2. Strategy-vs-receiver `env` match.
 3. `status='active'` gate (silent log-only on retry of fired/cancelled strategies).
-4. Symbol existence is enforced by GRVT itself: `fetch_mid_price` (and downstream order placement) fail loudly on unknown instruments and surface as `grvt_other` / `grvt_error` alerts. The user-facing safeguard is authoring-time verification — the agent calls `GrvtCcxt.fetch_market(symbol)` before creating the strategy and refuses to proceed if GRVT doesn't list it.
+4. Symbol existence is enforced by GRVT itself: `fetch_mid_price` (and downstream order placement) fail loudly on unknown instruments and surface as `grvt_other` / `grvt_error` alerts. The user-facing safeguard is authoring-time verification - the agent calls `GrvtCcxt.fetch_market(symbol)` before creating the strategy and refuses to proceed if GRVT doesn't list it.
 5. Top-level safety net: any unhandled exception in the background task emits a `receiver_internal_error` alert.
 6. Post-order DB write is wrapped: if it fails, emit `manual_intervention_required` with the order ID so the operator can manually reconcile.
 

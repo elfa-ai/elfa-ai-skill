@@ -18,13 +18,16 @@ every link in the chain works end-to-end.
   ```
   The receiver logs `supervisor started` and then `spawning SSE task for
   <query_id>` for each active strategy. No tunnel or public URL needed.
-- Telegram bot has spoken to you at least once and `TELEGRAM_CHAT_ID` is
-  correct. Verify:
+- (Optional) If Telegram is configured, the bot has spoken to you at
+  least once and `TELEGRAM_CHAT_ID` is correct. Verify:
   ```bash
-  curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
-       -d "chat_id=$TELEGRAM_CHAT_ID&text=smoke test ping"
+  if [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_CHAT_ID" ]; then
+    curl -s -X POST "https://api.telegram.org/bot$TELEGRAM_BOT_TOKEN/sendMessage" \
+         -d "chat_id=$TELEGRAM_CHAT_ID&text=smoke test ping"
+  fi
   ```
-  You should see "smoke test ping" arrive in Telegram.
+  If Telegram is configured you should see "smoke test ping" arrive in
+  Telegram. If not, in-chat alerts via `registry_cli.py alerts` still work.
 - GRVT account has at least $200 of free margin and supports
   `BTC_USDT_Perp` trading.
 

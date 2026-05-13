@@ -30,35 +30,47 @@ If there are no pending alerts, say nothing about alerts and continue.
 
    Before calling Builder Chat, prepend `Notify me when:` to the user's description unless the description is already framed as a notification request (e.g. it already starts with "notify me", "alert me", "tell me when", etc.). This is non-negotiable: the Elfa-side action must be `notify` (or another notify-style action), never an execute / trade action. Do not double-wrap if the user's description is already framed that way.
 
-   Builder Chat returns a draft query with `conditions` and `actions`. **Pass the response through unchanged.** Do not strip or replace the actions block. The receiver consumes triggers via SSE on the query id, not via the actions block, so the actions content is irrelevant to the bot's execution path.
+   The response shape per `docs.elfa.ai/api/rest/auto-chat-v-2` is:
 
-   **Never hand-write or hand-edit the `conditions` block.** Builder Chat is the only authority for EQL. If its conditions don't match the user's intent (wrong operator, missing leg of an AND, wrong timeframe, etc.), re-prompt Builder Chat with a clearer description or ask the user to rephrase; do not edit the JSON yourself. `references/elfa-eql.md` documents the syntax for understanding what Builder Chat returned, not as a spec for you to write against.
+   ```json
+   {
+     "sessionId": "session-uuid",
+     "response": "I can help with that...\n\n```json\n{...EQL draft...}\n```\n",
+     "title": "BTC Breakout Alert",
+     "reasoning": null,
+     "planIds": []
+   }
+   ```
+
+   The EQL draft is embedded as a fenced JSON code block inside the `response` markdown. **Extract that JSON verbatim** and use it as the `query` field when calling validate / create. `sessionId` lets you continue the conversation on follow-up prompts; persist it if you want to iterate with Builder Chat on the same draft.
+
+   **Never hand-write or hand-edit the EQL `conditions` block.** Builder Chat is the only authority. If its conditions don't match the user's intent (wrong operator, missing leg of an AND, wrong timeframe, etc.), re-prompt Builder Chat with a clearer description (or use `sessionId` to continue the same conversation) or ask the user to rephrase; do not edit the JSON yourself. `references/elfa-eql.md` documents the syntax for understanding what Builder Chat returned, not as a spec for you to write against.
 
 2. **Ask the user for any GRVT order params they did not volunteer**:
-   - Symbol on GRVT (e.g. `SOL_USDT_Perp`). Before continuing, verify the symbol exists by calling `GrvtCcxt.fetch_market(symbol)` from the grvt-trading skill. If it raises or returns nothing, tell the user "GRVT doesn't have that token" and stop. There is no static allowlist; GRVT itself is the source of truth.
-   - Size in base-asset units (or notional in USD if the user prefers; convert)
-   - Order type (market or limit; default market)
-   - Limit price if limit order
-   - Leverage (optional; usually account-default applies anyway)
-   - Time-in-force (optional; default `GOOD_TILL_TIME`)
-   - `max_notional_usd` cap (default a small buffer over expected notional)
-   - `tp_pct` and `sl_pct` (optional; if either provided, the receiver arms an OTOCO bracket)
+ - Symbol on GRVT (e.g. `SOL_USDT_Perp`). Before continuing, verify the symbol exists by calling `GrvtCcxt.fetch_market(symbol)` from the grvt-trading skill. If it raises or returns nothing, tell the user "GRVT doesn't have that token" and stop. There is no static allowlist; GRVT itself is the source of truth.
+ - Size in base-asset units (or notional in USD if the user prefers; convert)
+ - Order type (market or limit; default market)
+ - Limit price if limit order
+ - Leverage (optional; usually account-default applies anyway)
+ - Time-in-force (optional; default `GOOD_TILL_TIME`)
+ - `max_notional_usd` cap (default a small buffer over expected notional)
+ - `tp_pct` and `sl_pct` (optional; if either provided, the receiver arms an OTOCO bracket)
 
-3. **Validate the EQL** via `POST /v2/auto/queries/validate`. Catches malformed queries before the cost.
+3. **Validate the EQL** via `POST /v2/auto/queries/validate`. Per `docs.elfa.ai/api/rest/auto-validate-query-v-2` the response is `{valid, errors, warnings, estimatedCost, simulationLlmCallsEstimate}`. If `valid` is `false`, surface the errors and stop. Don't call create. Validate is free; create is not.
 
 4. **Show the user the full plan**:
-   - The EQL conditions
-   - The order spec (side, size, symbol, type, leverage)
-   - Cap, env, expiry
-   - Whether `wouldTriggerNow` is true (if so, flag that it will fire immediately)
-   - For LLM strategies: the estimated credits
+ - The EQL conditions
+ - The order spec (side, size, symbol, type, leverage)
+ - Cap, env, expiry
+ - Estimated credits / cost from validate's `estimatedCost`
+ - For LLM strategies: the simulation LLM call estimate
 
-   Wait for an explicit "yes".
+   Wait for an explicit "yes". (If the user wants to know whether the condition is already true, call `POST /v2/auto/queries/validate` first or poll-query after create to read `latestEvaluation.wouldTriggerNow` - that field lives on the poll response, not the validate response.)
 
 5. **On approval**:
-   a. `POST /v2/auto/queries` with the validated body unchanged. Default `expiresIn` is `24h` unless the user requested otherwise.
-   b. `python src/registry_cli.py add ...` with all the strategy params. The CLI inserts a row keyed by `query_id`.
-   c. Confirm to the user with `query_id`, status `active`, and expiry.
+   a. `POST /v2/auto/queries` with the validated body unchanged. Default `expiresIn` is `24h` unless the user requested otherwise. The response shape is `{queryId, status, cost}` per `docs.elfa.ai/api/rest/auto-create-query-v-2`.
+   b. `python src/registry_cli.py add ...` with all the strategy params, using the `queryId` returned by create. The CLI stores it as the local `query_id` column.
+   c. Confirm to the user with the `queryId`, status (`active`), and expiry.
    d. The receiver's supervisor polls the registry every ~5s and will open an SSE stream for the new query automatically. If the receiver is not running, the user needs to start it (`python -m elfa_grvt_bot`).
 
 ## Defaults this project uses

@@ -8,12 +8,8 @@ logger = logging.getLogger(__name__)
 
 
 class TelegramSender:
-    """Telegram Bot API sender. Optional by design: if either bot_token or
-    chat_id is empty, every send() is a silent no-op returning False. This
-    matches the architecture promise that Telegram is purely additive on top
-    of the in-chat alert channel (see architecture.md notification channels)
-    and lets the receiver run cleanly with `.env` Telegram vars left blank.
-    """
+    """Telegram Bot API sender. Optional: send() is a silent no-op when
+    bot_token or chat_id is empty so the receiver runs without Telegram."""
 
     def __init__(self, bot_token: str, chat_id: str, timeout: float = 5.0) -> None:
         self.bot_token = bot_token

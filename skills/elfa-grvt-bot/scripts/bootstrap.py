@@ -59,7 +59,7 @@ def log(msg: str, ok: bool = True) -> None:
 
 # Progress tracking. Bootstrap announces phase boundaries as it runs so the
 # user (and any orchestrating LLM) can see how far along we are. The
-# percentages are coarse milestones, not a smooth curve — they map to the
+# percentages are coarse milestones, not a smooth curve - they map to the
 # 6 user-visible phases listed in announce_plan().
 PHASE_NAMES = [
     "deploy source",
@@ -74,7 +74,7 @@ PHASE_NAMES = [
 def announce_plan(skip_tests: bool) -> None:
     print()
     print("=" * 60)
-    print("Setup plan — 6 phases:")
+    print("Setup plan - 6 phases:")
     for i, name in enumerate(PHASE_NAMES, 1):
         suffix = "  (skipped via --skip-tests)" if skip_tests and "test" in name else ""
         print(f"  {i}. {name}{suffix}")
@@ -210,7 +210,7 @@ def step_check_env(target: Path) -> dict:
         print()
         print("Required env vars are not set in .env:")
         for k in missing:
-            print(f"  - {k}")
+            print(f" - {k}")
         print()
         print(f"Edit {env_path} and re-run bootstrap.")
         raise SystemExit("env incomplete")

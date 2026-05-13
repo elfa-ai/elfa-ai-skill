@@ -21,8 +21,9 @@ pip install -e ".[dev]"
 
 Copy `.env.example` to `.env` and fill in:
 
-- **Elfa**: `ELFA_API_KEY` (from your Elfa developer portal). All
-  `/v2/auto/*` calls authenticate with this key alone.
+- **Elfa**: `ELFA_API_KEY` (from your Elfa developer portal). HMAC is
+  not needed because this bot only creates notify-style Auto queries
+  (`Notify me when: ...`); trade-flavoured actions would require HMAC.
 - **GRVT**: `GRVT_API_KEY`, `GRVT_PRIVATE_KEY`, `GRVT_TRADING_ACCOUNT_ID`
   (from GRVT → Settings → API Keys). `GRVT_ENV=prod` is the project default.
 - **Telegram**: `TELEGRAM_BOT_TOKEN` (from `@BotFather`), `TELEGRAM_CHAT_ID`

@@ -10,10 +10,10 @@
 # agent's session-start / pre-prompt hook if your CLI supports it.
 #
 # Behavior:
-#   - exits 0 silently if there's nothing to report (no alerts, no DB yet,
+# - exits 0 silently if there's nothing to report (no alerts, no DB yet,
 #     missing env, registry_cli not importable)
-#   - never blocks the user prompt (stderr swallowed, errors non-fatal)
-#   - auto-acks alerts after printing so the same item isn't repeated
+# - never blocks the user prompt (stderr swallowed, errors non-fatal)
+# - auto-acks alerts after printing so the same item isn't repeated
 
 set -u
 
