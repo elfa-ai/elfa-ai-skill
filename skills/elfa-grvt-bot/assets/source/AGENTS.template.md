@@ -76,19 +76,27 @@ When the user describes a strategy:
       strategy gets an SSE stream opened automatically. If the receiver
       isn't running, the user needs to start it (`python -m elfa_grvt_bot`).
 
-## How fires arrive (SSE + REST backfill)
+## How fires arrive (live SSE only)
 
 The receiver (`python -m elfa_grvt_bot`) maintains one SSE connection per
-`active` strategy. When Elfa's conditions evaluate true, the SSE stream
-emits an `event: notification` with the trigger payload (including
-`executionId`, used as the dedupe key), then closes. The receiver
-processes the fire and the strategy transitions to `fired`.
+live strategy (status `active` or `recurring`). When Elfa's conditions
+evaluate true, the SSE stream emits `event: query.triggered` with the
+canonical event payload from `docs.elfa.ai/auto/notifications`
+(top-level fields: `eventId`, `eventType`, `version`, `timestamp`,
+`queryId`, `channel`, `trigger`, `evaluation`, `action`). The receiver
+keys idempotency on `eventId` and processes the fire; the strategy
+transitions to `fired`.
 
-If the receiver was offline when a strategy triggered, on next startup the
-supervisor does a `GET /v2/auto/queries/:id` for each locally-active
-strategy. Any executions returned that aren't already in our `fires` table
-get replayed through the same handler. This is the safety net that
-recovers from crashes/restarts.
+If the receiver was offline when a strategy triggered, the fire is not
+recovered automatically: SSE eventIds (`evt_xxx`) and poll-query
+executions (`exec_xxx`) are different identifier namespaces per the
+documented schemas, so we cannot dedupe across channels safely. The
+supervisor still calls `GET /v2/auto/queries/:id` on startup for status
+reconciliation, and if it sees the remote query already in a terminal
+status with executions reported, it emits
+`manual_intervention_required` so the user reviews the GRVT side
+manually. Run the receiver under systemd / a PaaS auto-restarter to keep
+the offline window minimal.
 
 ## Environment defaults (project-specific)
 

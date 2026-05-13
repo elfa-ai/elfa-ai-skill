@@ -41,13 +41,13 @@ source .venv/bin/activate
 python -m elfa_grvt_bot
 ```
 
-On restart the supervisor immediately runs a REST backfill for every active strategy: it calls `GET /v2/auto/queries/:id` for each registered active strategy and replays any executions not already in the local `fires` table. No manual intervention is needed for backlog -- missed fires are recovered automatically.
+On restart the supervisor calls `GET /v2/auto/queries/:id` (poll-query) for each registered active strategy to reconcile status. If a strategy already triggered while the receiver was offline, the bot does NOT replay it as a fire (SSE `eventId` and poll-query `executions[i].id` are different identifier namespaces per the docs -- cross-channel dedupe is unsafe). Instead it emits a `manual_intervention_required` alert so you review the GRVT side manually. To minimize this window, run the receiver under systemd or a PaaS auto-restarter.
 
 ## On SSE stream connection (in receiver logs)
 
 ### `401 Unauthorized` on stream open
 
-`ELFA_API_KEY` is wrong or expired. The `stream_query` call raises a `RuntimeError` with the status code. Rotate the key in `.env` and restart.
+`ELFA_API_KEY` is wrong or expired. The `stream_notifications` call raises a `RuntimeError` with the status code. Rotate the key in `.env` and restart.
 
 ### `404 Not Found` on stream open
 
@@ -71,11 +71,13 @@ python src/registry_cli.py list --status active
 
 If the output is empty, no strategies have been registered yet, or all were previously cancelled/fired.
 
-## Fires that didn't get processed live (recovered via backfill)
+## Fires that landed while the receiver was offline
 
-If the receiver was offline when a strategy triggered, the fire is not lost. On startup (and after every SSE reconnect), the supervisor calls `GET /v2/auto/queries/:id` for each active strategy. The response includes an `executions` array. For each entry whose `id` is absent from the local `fires` table, the supervisor calls `_process_fire` with a synthetic payload (`"source": "rest_backfill"`). The execution goes through the same guardrails, leverage, and GRVT order placement path as a live SSE event.
+The bot does NOT auto-replay offline fires. SSE notifications carry an `eventId` (`evt_xxx`); poll-query `executions[i].id` (`exec_xxx`) is a different identifier namespace per the documented schemas (`auto/notifications` vs `api/rest/auto-poll-query-v-2`). Replaying poll-query executions through the order path would risk double-placing trades when both channels later catch up.
 
-Deduplication is by execution id, so a fire can never be processed twice even if backfill and a live SSE event race.
+Instead: on supervisor startup, poll-query reconciles status. If the remote query is in a terminal state AND executions are present, the supervisor emits a `manual_intervention_required` alert listing the strategy. Review the GRVT side and decide whether to enter manually.
+
+To keep the offline window minimal, run the receiver under systemd / a PaaS auto-restarter.
 
 ## In Telegram alerts
 

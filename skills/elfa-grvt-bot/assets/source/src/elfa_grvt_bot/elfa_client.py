@@ -97,22 +97,32 @@ class ElfaClient:
             f"/v2/auto/executions/{execution_id}", op="get_execution"
         )
 
-    async def stream_query(
+    async def stream_notifications(
         self, query_id: str, *, http_client: Optional[httpx.AsyncClient] = None
     ) -> AsyncIterator[dict]:
-        """Yield SSE `notification` events for one query until the stream closes.
+        """Yield SSE `query.triggered` events for one query until the stream
+        closes.
 
-        The stream emits at most one `notification` event (the trigger), then
-        an `event: end` and the connection closes. A 410 response means the
-        query was already in a terminal state on connect - yields nothing and
-        returns.
+        Per the canonical event contract documented in `auto/notifications`,
+        each event carries:
+          - SSE protocol line `id: evt_xxx`
+          - SSE event type `event: query.triggered`
+          - JSON `data` with top-level fields `eventId`, `eventType`,
+            `version`, `timestamp`, `queryId`, `channel`, `trigger`,
+            `evaluation`, `action`
+
+        The stream emits one or more triggered events until the query
+        terminates, then closes. A 410 response on connect means the query
+        was already terminal - yields nothing and returns; the caller
+        should fall back to `get_query()` for status reconciliation.
 
         Yields dicts of shape:
-            {"event_id": "<uuid>", "data": {<parsed fire payload>}}
+            {"event_id": "<eventId>", "data": {<parsed event payload>}}
 
-        Caller is responsible for the lifecycle: on stream exit it should
-        call `get_query()` to backfill in case the fire arrived during a
-        reconnect gap.
+        `event_id` is taken from the JSON payload's `eventId` field
+        (canonical idempotency key per the docs). The SSE protocol `id:`
+        line is the same string per the published example, so we use it
+        as a fallback if the payload is missing or unparsable.
         """
         url = f"{self.base_url}/v2/auto/queries/{query_id}/stream"
         headers = {
@@ -129,24 +139,38 @@ class ElfaClient:
                 if r.status_code != 200:
                     body = (await r.aread()).decode(errors="replace")[:300]
                     raise RuntimeError(
-                        f"elfa stream_query failed: {r.status_code} {body}"
+                        f"elfa stream_notifications failed: {r.status_code} {body}"
                     )
                 current: dict = {}
                 async for line in r.aiter_lines():
                     if line.startswith(":"):
                         continue  # keep-alive comment
                     if line == "":
-                        if current.get("event") == "notification" and "data" in current:
+                        # Trigger events use `event: query.triggered` per the
+                        # canonical contract (see auto/notifications). Older
+                        # `event: notification` is accepted defensively in
+                        # case Elfa rolls back; both are processed the same
+                        # way. `event: end` and anything else terminate the
+                        # frame loop without yielding.
+                        event_type = current.get("event")
+                        if (
+                            event_type in ("query.triggered", "notification")
+                            and "data" in current
+                        ):
                             try:
                                 payload = json.loads(current["data"])
                             except json.JSONDecodeError:
                                 payload = {"raw": current["data"]}
-                            yield {
-                                "event_id": current.get("id"),
-                                "data": payload,
-                            }
-                        # An `event: end` (or anything else) ends the stream
-                        # naturally; the iterator exits when the server closes.
+                            # Canonical idempotency key is `eventId` per
+                            # auto/notifications. The SSE protocol `id:`
+                            # line carries the same string in the documented
+                            # example, so use it as a fallback.
+                            event_id = (
+                                payload.get("eventId")
+                                if isinstance(payload, dict)
+                                else None
+                            ) or current.get("id")
+                            yield {"event_id": event_id, "data": payload}
                         current = {}
                         continue
                     if ":" not in line:

@@ -316,77 +316,97 @@ class _FakeElfa:
             return states[0]
         return states.pop(0)
 
-    async def stream_query(self, query_id):
+    async def stream_notifications(self, query_id):
         for ev in self.sse_events.get(query_id, []):
             yield ev
 
 
-async def test_strategy_loop_processes_sse_notification(tmp_path):
+async def test_strategy_loop_processes_canonical_sse_event(tmp_path):
+    """End-to-end: poll-query reports active, SSE yields a canonical
+    query.triggered event keyed on eventId, fire handler places the GRVT
+    order, then poll-query reports terminal so the loop exits cleanly."""
     cfg, registry, executor, _, alerts = _setup(tmp_path, strategy=_strategy())
     fake = _FakeElfa(
         query_states={"q_abc": [
-            {"queryId": "q_abc", "status": "active", "executions": []},
-            # After SSE closes, REST shows terminal -> loop exits
+            {"queryId": "q_abc", "status": "active",
+             "latestEvaluation": None, "executions": []},
+            # After SSE closes, poll reports terminal -> loop exits.
             {"queryId": "q_abc", "status": "triggered",
-             "executions": [{"id": "exec_1", "createdAt": "2026-05-12T10:41:03Z",
-                             "type": "notification", "status": "success"}]},
+             "latestEvaluation": None,
+             "executions": [{"id": "exec_internal_1",
+                             "queryId": "q_abc",
+                             "type": "notify",
+                             "status": "success",
+                             "createdAt": "2026-05-12T10:41:03Z"}]},
         ]},
         sse_events_by_query={"q_abc": [
-            {"event_id": "exec_1",
-             "data": {"queryId": "q_abc", "executionId": "exec_1",
-                      "status": "triggered"}},
+            {"event_id": "evt_01J_live",
+             "data": {"version": "1.0",
+                      "eventType": "query.triggered",
+                      "eventId": "evt_01J_live",
+                      "queryId": "q_abc",
+                      "channel": "sse",
+                      "trigger": {"symbol": "BTC"}}},
         ]},
     )
     await _strategy_loop(
         "q_abc", config=cfg, registry=registry, elfa=fake,
         executor=executor, alerts=alerts,
     )
-    fire = registry.get_fire("exec_1")
+    fire = registry.get_fire("evt_01J_live")
     assert fire is not None
     assert fire["outcome"] == "placed"
     executor.place_entry_with_tpsl.assert_called_once()
 
 
-async def test_strategy_loop_backfills_missed_execution(tmp_path):
-    """If the supervisor was offline when the trigger fired, REST backfill
-    must replay the execution into _process_fire."""
+async def test_strategy_loop_recurring_status_treated_as_live(tmp_path):
+    """`recurring` is a live status per the documented Auto state set.
+    Treating it as terminal would tear down recurring queries after the
+    first fire. The loop must keep iterating until status is in the
+    documented terminal set."""
     cfg, registry, executor, _, alerts = _setup(tmp_path, strategy=_strategy())
     fake = _FakeElfa(
         query_states={"q_abc": [
-            # First REST call: already terminal with a missed execution
+            {"queryId": "q_abc", "status": "recurring",
+             "latestEvaluation": None, "executions": []},
+            # After SSE close, poll shows triggered -> loop exits.
             {"queryId": "q_abc", "status": "triggered",
-             "executions": [
-                 {"id": "exec_missed", "createdAt": "2026-05-12T10:00:00Z",
-                  "type": "notification", "status": "success"}
-             ]},
+             "latestEvaluation": None, "executions": []},
         ]},
-        sse_events_by_query={},  # no SSE, loop should exit immediately
+        sse_events_by_query={"q_abc": [
+            {"event_id": "evt_rec",
+             "data": {"eventType": "query.triggered",
+                      "eventId": "evt_rec",
+                      "queryId": "q_abc"}},
+        ]},
     )
     await _strategy_loop(
         "q_abc", config=cfg, registry=registry, elfa=fake,
         executor=executor, alerts=alerts,
     )
-    fire = registry.get_fire("exec_missed")
+    # Should have actually processed the SSE event because recurring is live.
+    fire = registry.get_fire("evt_rec")
     assert fire is not None
     assert fire["outcome"] == "placed"
-    executor.place_entry_with_tpsl.assert_called_once()
 
 
-async def test_strategy_loop_skips_already_processed_executions(tmp_path):
-    """REST backfill must NOT re-fire an execution that's already in our
-    local fires table."""
+async def test_strategy_loop_offline_trigger_emits_manual_intervention(tmp_path):
+    """If the strategy fires on Elfa while the receiver was offline,
+    poll-query returns executions[] but their ids are in a different
+    namespace than SSE eventIds. We must NOT replay them through the
+    order-placement path (would double-fire on GRVT or fire stale signals).
+    Instead emit a manual_intervention_required alert so the user reviews
+    the GRVT side themselves."""
     cfg, registry, executor, _, alerts = _setup(tmp_path, strategy=_strategy())
-    # Pre-seed an existing fire for the execution id we'll see in REST.
-    registry.insert_fire_if_new(
-        event_id="exec_dup", query_id="q_abc", received_at=1,
-        outcome="placed", raw_payload="{}",
-    )
     fake = _FakeElfa(
         query_states={"q_abc": [
             {"queryId": "q_abc", "status": "triggered",
-             "executions": [
-                 {"id": "exec_dup", "createdAt": "2026-05-12T10:00:00Z"}
-             ]},
+             "latestEvaluation": None,
+             "executions": [{"id": "exec_xxx",
+                             "queryId": "q_abc",
+                             "type": "notify",
+                             "status": "success",
+                             "createdAt": "2026-05-12T10:00:00Z"}]},
         ]},
         sse_events_by_query={},
     )
@@ -394,4 +414,137 @@ async def test_strategy_loop_skips_already_processed_executions(tmp_path):
         "q_abc", config=cfg, registry=registry, elfa=fake,
         executor=executor, alerts=alerts,
     )
+    # Local status synced.
+    assert registry.get_strategy("q_abc").status == "fired"
+    # NO order was placed.
     executor.place_entry_with_tpsl.assert_not_called()
+    # Alert was emitted so user knows to reconcile.
+    pending = registry.list_alerts(only_unacked=True)
+    manual = [a for a in pending
+              if a["category"] == "manual_intervention_required"]
+    assert len(manual) == 1
+    assert "receiver was disconnected" in manual[0]["message"].lower() \
+        or "receiver was disconnected" in manual[0]["message"]
+
+
+async def test_strategy_loop_syncs_remote_cancel_to_local_registry(tmp_path):
+    """User cancels on Elfa UI directly. Poll detects `cancelled`, local
+    registry is synced, warning alert is emitted, supervisor stops
+    re-spawning the task."""
+    cfg, registry, executor, sender, alerts = _setup(
+        tmp_path, strategy=_strategy(),
+    )
+    fake = _FakeElfa(
+        query_states={"q_abc": [
+            {"queryId": "q_abc", "status": "cancelled",
+             "latestEvaluation": None, "executions": []},
+        ]},
+        sse_events_by_query={},
+    )
+    await _strategy_loop(
+        "q_abc", config=cfg, registry=registry, elfa=fake,
+        executor=executor, alerts=alerts,
+    )
+    assert registry.get_strategy("q_abc").status == "cancelled"
+    pending = registry.list_alerts(only_unacked=True)
+    terminated = [a for a in pending
+                  if a["category"] == "strategy_terminated_remotely"]
+    assert len(terminated) == 1
+    assert terminated[0]["severity"] == "warning"
+
+
+async def test_strategy_loop_expiry_emits_info_not_warning(tmp_path):
+    """expired = expected lifecycle (24h elapsed); info severity only so
+    it doesn't Telegram-ping the user."""
+    cfg, registry, executor, sender, alerts = _setup(
+        tmp_path, strategy=_strategy(),
+    )
+    fake = _FakeElfa(
+        query_states={"q_abc": [
+            {"queryId": "q_abc", "status": "expired",
+             "latestEvaluation": None, "executions": []},
+        ]},
+        sse_events_by_query={},
+    )
+    await _strategy_loop(
+        "q_abc", config=cfg, registry=registry, elfa=fake,
+        executor=executor, alerts=alerts,
+    )
+    assert registry.get_strategy("q_abc").status == "expired"
+    pending = registry.list_alerts(only_unacked=True)
+    terminated = [a for a in pending
+                  if a["category"] == "strategy_terminated_remotely"]
+    assert len(terminated) == 1
+    assert terminated[0]["severity"] == "info"
+
+
+async def test_strategy_loop_failed_status_handled(tmp_path):
+    """`failed` is one of the documented terminal statuses. The loop must
+    reconcile it (mark local strategy `failed`, warning alert) rather than
+    looping forever."""
+    cfg, registry, executor, sender, alerts = _setup(
+        tmp_path, strategy=_strategy(),
+    )
+    fake = _FakeElfa(
+        query_states={"q_abc": [
+            {"queryId": "q_abc", "status": "failed",
+             "latestEvaluation": None, "executions": []},
+        ]},
+        sse_events_by_query={},
+    )
+    await _strategy_loop(
+        "q_abc", config=cfg, registry=registry, elfa=fake,
+        executor=executor, alerts=alerts,
+    )
+    assert registry.get_strategy("q_abc").status == "failed"
+    pending = registry.list_alerts(only_unacked=True)
+    terminated = [a for a in pending
+                  if a["category"] == "strategy_terminated_remotely"]
+    assert len(terminated) == 1
+    assert terminated[0]["severity"] == "warning"
+
+
+async def test_strategy_loop_live_sse_fire_no_extra_terminated_alert(tmp_path):
+    """When a fire arrives live via SSE, `_process_fire` produces
+    order_placed / tpsl_armed alerts and transitions the local strategy
+    `active -> fired`. The poll-query that follows should see status as
+    terminal but find local status NOT active anymore, so it must NOT add
+    a second `strategy_terminated_remotely` alert on top."""
+    cfg, registry, executor, _, alerts = _setup(
+        tmp_path, strategy=_strategy(),
+    )
+    fake = _FakeElfa(
+        query_states={"q_abc": [
+            {"queryId": "q_abc", "status": "active",
+             "latestEvaluation": None, "executions": []},
+            # After SSE close, poll sees terminal
+            {"queryId": "q_abc", "status": "triggered",
+             "latestEvaluation": None,
+             "executions": [{"id": "exec_irrelevant",
+                             "queryId": "q_abc",
+                             "type": "notify", "status": "success",
+                             "createdAt": "2026-05-12T10:00:00Z"}]},
+        ]},
+        sse_events_by_query={"q_abc": [
+            {"event_id": "evt_live",
+             "data": {"eventType": "query.triggered",
+                      "eventId": "evt_live",
+                      "queryId": "q_abc"}},
+        ]},
+    )
+    await _strategy_loop(
+        "q_abc", config=cfg, registry=registry, elfa=fake,
+        executor=executor, alerts=alerts,
+    )
+    pending = registry.list_alerts(only_unacked=True)
+    # No double-alert: the strategy_terminated_remotely is suppressed
+    # because local status is already `fired` after the live SSE fire.
+    assert not any(
+        a["category"] == "strategy_terminated_remotely" for a in pending
+    )
+    assert any(a["category"] == "order_placed" for a in pending)
+    # And we did NOT emit manual_intervention_required either, since the
+    # fire was handled live.
+    assert not any(
+        a["category"] == "manual_intervention_required" for a in pending
+    )

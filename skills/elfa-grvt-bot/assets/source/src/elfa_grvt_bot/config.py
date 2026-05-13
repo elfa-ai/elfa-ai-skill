@@ -13,6 +13,11 @@ class Config:
     grvt_private_key: str
     grvt_trading_account_id: str
     grvt_env: str
+    # Telegram is optional: both fields default to empty strings. When either
+    # is empty TelegramSender / AlertWriter silently skip the push, and alerts
+    # stay in-chat via the registry. Bootstrap.py and setup.md both document
+    # this; Config.load must agree or the receiver crashes on first start for
+    # users who opted out.
     telegram_bot_token: str
     telegram_chat_id: str
     registry_db_path: str
@@ -37,7 +42,7 @@ class Config:
             grvt_private_key=required("GRVT_PRIVATE_KEY"),
             grvt_trading_account_id=required("GRVT_TRADING_ACCOUNT_ID"),
             grvt_env=grvt_env,
-            telegram_bot_token=required("TELEGRAM_BOT_TOKEN"),
-            telegram_chat_id=required("TELEGRAM_CHAT_ID"),
+            telegram_bot_token=os.environ.get("TELEGRAM_BOT_TOKEN", ""),
+            telegram_chat_id=os.environ.get("TELEGRAM_CHAT_ID", ""),
             registry_db_path=required("REGISTRY_DB_PATH"),
         )

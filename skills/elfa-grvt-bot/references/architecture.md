@@ -64,7 +64,7 @@ High-level design of the elfa-grvt-bot.
 | `guardrails.py` | Pure-function checks (notional cap, env match, status). Symbol existence is delegated to GRVT (fetch_mid_price/order placement). |
 | `telegram_sender.py` | Bot API send; never raises (only constructed when TELEGRAM_* are configured) |
 | `alerts.py` | AlertWriter: registry insert (always) plus Telegram push (when configured) |
-| `elfa_client.py` | Thin client over `/v2/auto/*`: builder_chat, validate, create, cancel (API-key auth); `get_query` for REST backfill; `stream_query` async SSE consumer |
+| `elfa_client.py` | Thin client over `/v2/auto/*`: builder_chat, validate, create, cancel (API-key auth); `get_query` for REST backfill; `stream_notifications` async SSE consumer |
 | `grvt_executor.py` | High-level GRVT operations; wraps GrvtCcxt + trigger client |
 | `grvt_trigger_client.py` | Raw API for trigger orders + bulk_orders (OTOCO/OCO/OTO) |
 | `receiver.py` | `supervisor` + per-strategy `_strategy_loop` (SSE consumer + backfill) + `_process_fire` fire handler |
@@ -74,11 +74,9 @@ High-level design of the elfa-grvt-bot.
 ## Data flow on a fire
 
 1. Auto evaluates condition; transitions to true.
-2. Two paths deliver the notification — whichever arrives first wins; the other is a no-op:
-   - **Live SSE**: the per-strategy task receives `event: notification\ndata: <json>\n\n` on the open stream. The JSON carries `executionId` (dedupe key), `queryId`, and trigger metadata. After emitting the notification the stream closes.
-   - **REST backfill**: on supervisor startup and after each SSE disconnect, `elfa.get_query(query_id)` fetches current state. Any `executions[i].id` not yet in the local `fires` table is replayed through the same fire handler.
-3. Fire handler (`_process_fire`) runs — identical business logic regardless of delivery path:
-   - INSERT OR IGNORE into `fires` keyed by `executionId`. Duplicate → no-op, return early.
+2. **Live SSE is the sole order-placement path.** The per-strategy task receives `event: query.triggered\ndata: <json>\n\n` on the open stream. The JSON carries `eventId` (canonical dedupe key per `docs.elfa.ai/auto/notifications`), `queryId`, `eventType`, `timestamp`, `channel`, `trigger`, `evaluation`, `action`. After emitting the trigger the stream closes (single-fire by design).
+3. Fire handler (`_process_fire`) runs:
+   - INSERT OR IGNORE into `fires` keyed by `eventId`. Duplicate -> no-op, return early.
    - SELECT strategy by `query_id`. If missing, alert `unknown_strategy`, bail.
    - If `strategy.status != 'active'`, log silently and bail (suppresses duplicate-fire noise).
    - Spawn daemon thread to send `trigger_received` Telegram alert (non-blocking).
@@ -95,21 +93,33 @@ High-level design of the elfa-grvt-bot.
 
 ## Strategy lifecycle
 
+Documented Auto status set (`docs.elfa.ai/auto/agent-quickstart`,
+`v-2-auto.tag`):
+
+- **Live**: `active`, `recurring`
+- **Terminal**: `triggered`, `expired`, `cancelled`, `failed`
+
 ```
-       active ───── fire (success) ─────▶ fired
-         │                                  ▲
-         │                                  │
-         ├───── fire (terminal grvt) ───────┘
-         │
-         ├───── Auto expiresIn elapsed ───▶ expired
-         │
-         └───── user runs cancel ──────────▶ cancelled
-                  (POST /v2/auto/queries/:id/cancel)
+       active ----- fire (success) ------> fired
+         |                                  ^
+         |                                  |
+         +----- fire (terminal grvt) -------+
+         |
+         +----- Auto expiresIn elapsed ---> expired
+         |
+         +----- user runs cancel ---------> cancelled
+         |        (POST /v2/auto/queries/:id/cancel)
+         |
+         +----- Elfa marks failed --------> failed
+         |
+         +----- terminal status detected --> (manual_intervention_required)
+                  on poll-query while         alert if executions occurred
+                  receiver was offline        while we were not on SSE
 ```
 
-A fire is detected either by the live SSE notification or by the REST backfill diff — both paths run through the same handler. When a strategy enters a terminal status the supervisor cancels its SSE task on the next reconcile cycle.
+When poll-query reports a terminal remote status, the supervisor reconciles the local status and emits an alert. It does NOT replay missed executions through the order path (see "REST is status-only" below). The per-strategy SSE task exits cleanly on the next reconcile cycle.
 
-Single-fire by design. To re-arm a strategy, create a new one.
+Single-fire by design for `active`. `recurring` queries keep the SSE stream open across triggers until a documented terminal status is observed.
 
 ## Notification channels
 
@@ -130,7 +140,13 @@ This dual design means the user always gets alerts in chat (free, no extra crede
 
 ## Idempotency
 
-`executionId` is the PK of `fires`. INSERT OR IGNORE means a duplicate notification — whether from a live SSE re-delivery or a backfill pass that sees the same execution twice across restarts — becomes a no-op insert and the handler returns early. At-least-once delivery (from either channel) becomes exactly-once order placement.
+`eventId` (canonical per `docs.elfa.ai/auto/notifications`) is the PK of `fires`. INSERT OR IGNORE means a duplicate SSE delivery of the same event becomes a no-op insert and the handler returns early. At-least-once SSE delivery becomes exactly-once order placement.
+
+## REST is status-only
+
+`GET /v2/auto/queries/:id` returns an `executions` array whose elements are internal Athena execution records keyed by `executions[i].id` (`exec_xxx`). This is a **different identifier namespace** from the SSE `eventId` (`evt_xxx`). The bot does not attempt to dedupe SSE fires against poll-query executions because the two namespaces would never collide and the same trigger would be processed twice -- once via SSE, once via poll-query replay. Instead, poll-query is used strictly for status reconciliation: the local strategy status is synced when remote terminal status is observed, and if executions were reported while the receiver was offline the user gets a `manual_intervention_required` alert to review GRVT manually.
+
+Trade-off accepted: restart-during-fire = miss one trade. Mitigated operationally by running the receiver under systemd / a PaaS auto-restarter.
 
 ## Real-money safety primitives
 
