@@ -208,7 +208,7 @@ def test_place_tpsl_pair_short_entry_places_both():
     sleep_fn, _ = _fast_sleep_factory()
     ex = GrvtExecutor(client=fake, sleep=sleep_fn, trigger_client=trig)
 
-    # Short entry @ 100. tp_pct=1.5 → tp at 98.5 (buy below). sl_pct=1.0 → sl at 101 (buy above).
+    # Short entry @ 100. tp_pct=1.5 -> tp at 98.5 (buy below). sl_pct=1.0 -> sl at 101 (buy above).
     res = ex.place_tpsl_pair(
         symbol="SOL_USDT_Perp",
         entry_side="sell",
@@ -250,7 +250,7 @@ def test_place_tpsl_pair_long_entry_places_both_mirrored():
     sleep_fn, _ = _fast_sleep_factory()
     ex = GrvtExecutor(client=fake, sleep=sleep_fn, trigger_client=trig)
 
-    # Long entry @ 100. tp_pct=1.5 → tp at 101.5 (sell above). sl_pct=1.0 → sl at 99 (sell below).
+    # Long entry @ 100. tp_pct=1.5 -> tp at 101.5 (sell above). sl_pct=1.0 -> sl at 99 (sell below).
     res = ex.place_tpsl_pair(
         symbol="SOL_USDT_Perp",
         entry_side="buy",

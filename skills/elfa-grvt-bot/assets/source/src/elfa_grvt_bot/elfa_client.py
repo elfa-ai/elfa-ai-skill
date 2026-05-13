@@ -22,6 +22,19 @@ class ElfaStreamError(RuntimeError):
 
 
 _TRIGGER_EVENT_TYPES = ("query.triggered", "notification")
+_CANONICAL_EVENT_TYPE = "query.triggered"
+_REQUIRED_EVENT_FIELDS = (
+    "version",
+    "eventType",
+    "eventId",
+    "timestamp",
+    "queryId",
+    "channel",
+    "trigger",
+    "evaluation",
+    "action",
+)
+_NOTIFY_ACTION_TYPES = {"notify", "telegram_bot", "webhook"}
 
 
 async def _parse_sse_frames(
@@ -33,7 +46,7 @@ async def _parse_sse_frames(
  - have the wrong event type
  - have unparsable JSON in `data:`
  - have a payload that isn't a dict
- - are missing `eventId`
+ - are missing canonical top-level fields
  - belong to a different queryId than the stream URL
 
     Concatenates multiple `data:` lines with `\\n` per SSE spec.
@@ -91,22 +104,85 @@ def _build_event(
     if not isinstance(payload, dict):
         logger.warning("dropping SSE %r frame: data is not a JSON object", event_type)
         return None
-    event_id = payload.get("eventId") or sse_id
-    if not event_id:
-        logger.warning("dropping SSE %r frame: no eventId or SSE id", event_type)
+    missing = [field for field in _REQUIRED_EVENT_FIELDS if field not in payload]
+    if missing:
+        logger.warning("dropping SSE %r frame: missing fields %s", event_type, missing)
+        return None
+    if payload.get("eventType") != _CANONICAL_EVENT_TYPE:
+        logger.warning(
+            "dropping SSE %r frame: payload eventType %r != %r",
+            event_type,
+            payload.get("eventType"),
+            _CANONICAL_EVENT_TYPE,
+        )
+        return None
+    if not isinstance(payload.get("version"), str) or not payload.get("version"):
+        logger.warning("dropping SSE %r frame: invalid version", event_type)
+        return None
+    if not isinstance(payload.get("timestamp"), str) or not payload.get("timestamp"):
+        logger.warning("dropping SSE %r frame: invalid timestamp", event_type)
+        return None
+    if payload.get("channel") != "sse":
+        logger.warning(
+            "dropping SSE %r frame: payload channel %r != 'sse'",
+            event_type,
+            payload.get("channel"),
+        )
+        return None
+    if not isinstance(payload.get("trigger"), dict):
+        logger.warning("dropping SSE %r frame: invalid trigger", event_type)
+        return None
+    if not isinstance(payload.get("evaluation"), dict):
+        logger.warning("dropping SSE %r frame: invalid evaluation", event_type)
+        return None
+    event_id = payload.get("eventId")
+    if not isinstance(event_id, str) or not event_id:
+        logger.warning("dropping SSE %r frame: invalid eventId", event_type)
+        return None
+    if sse_id and sse_id != event_id:
+        logger.warning(
+            "dropping SSE %r frame: SSE id %r != data.eventId %r",
+            event_type,
+            sse_id,
+            event_id,
+        )
         return None
     payload_qid = payload.get("queryId")
-    if payload_qid and payload_qid != expected_query_id:
+    if payload_qid != expected_query_id:
         logger.warning(
             "dropping SSE frame: payload queryId %r != stream queryId %r",
             payload_qid, expected_query_id,
         )
         return None
+    if not _is_notify_action(payload.get("action")):
+        logger.warning("dropping SSE %r frame: non-notify action", event_type)
+        return None
     return {"event_id": event_id, "data": payload}
 
 
+def _is_notify_action(action: object) -> bool:
+    if not isinstance(action, dict):
+        return False
+    action_type = action.get("type")
+    if action_type in _NOTIFY_ACTION_TYPES:
+        return True
+    if action_type == "llm":
+        params = action.get("params", {})
+        if not isinstance(params, dict):
+            return False
+        callback = params.get("callback", {})
+        if not isinstance(callback, dict):
+            return False
+        callback_action = callback.get("action", {})
+        return (
+            isinstance(callback_action, dict)
+            and callback_action.get("type") in _NOTIFY_ACTION_TYPES
+        )
+    return False
+
+
 class ElfaClient:
-    """Thin client over /v2/auto/* endpoints. All routes accept API-key auth."""
+    """Thin client over /v2/auto/* endpoints for notify-only queries."""
 
     def __init__(
         self,
@@ -162,6 +238,14 @@ class ElfaClient:
 
     def create_query(self, body: dict) -> dict:
         """body shape: { "title", "description", "query": {...} }."""
+        query = body.get("query")
+        if not isinstance(query, dict):
+            raise ValueError("create_query requires a query object")
+        actions = query.get("actions")
+        if not isinstance(actions, list) or not actions:
+            raise ValueError("create_query requires at least one notify-style action")
+        if not all(_is_notify_action(action) for action in actions):
+            raise ValueError("create_query supports notify-style actions only")
         return self._post("/v2/auto/queries", body, op="create_query")
 
     def cancel_query(self, query_id: str) -> dict:
@@ -195,15 +279,15 @@ class ElfaClient:
     ) -> AsyncIterator[dict]:
         """Yield well-formed `query.triggered` SSE events for one query.
 
-        Fail-closed: any frame missing the canonical fields (`eventId`,
-        `eventType`, `queryId` matching the requested query_id) or with
-        unparsable JSON is logged and dropped. The caller never sees a
+        Fail-closed: any frame missing canonical top-level fields, with
+        `queryId` not matching the requested query_id, a non-notify action,
+        or unparsable JSON is logged and dropped. The caller never sees a
         malformed event and so cannot place a GRVT order on garbage.
 
         Canonical wire format (docs.elfa.ai/auto/notifications):
             event: query.triggered
             id: evt_01J...
-            data: {"version":"1.0","eventType":"query.triggered","eventId":"evt_01J...","queryId":"q_123","channel":"sse","trigger":{...},"evaluation":{...},"action":{...}}
+            data: {"version":"1.0","eventType":"query.triggered","eventId":"evt_01J...","timestamp":"2026-04-01T12:00:00.000Z","queryId":"q_123","channel":"sse","trigger":{...},"evaluation":{...},"action":{...}}
 
         Yields {"event_id": "<eventId>", "data": <parsed payload>}.
 

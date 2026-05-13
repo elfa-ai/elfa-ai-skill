@@ -47,10 +47,10 @@ Top-level JSON fields:
 - `evaluation` (`{"triggered":true}`)
 - `action` (`{"type":"notify"}` for notify-style queries)
 
-The SSE protocol `id:` line carries the same `eventId` value per the
-published example. The bot prefers `data.eventId` (the canonical field)
-and falls back to the SSE `id:` line defensively if the payload is missing
-or malformed.
+The SSE protocol `id:` line carries the same value as `data.eventId` per
+the published example. The bot treats `data.eventId` as the only
+idempotency key. If `id:` is present and differs from `data.eventId`, or
+if `data.eventId` is missing, the frame is dropped.
 
 ## Dedupe key
 
@@ -100,17 +100,21 @@ emits an alert:
   (we cannot safely replay because `executions[i].id` is not the same
   namespace as SSE `eventId`; the user reviews the GRVT side manually)
 - `expired` -> `strategy_terminated_remotely`, severity `info`
-- `cancelled` / `failed` -> `strategy_terminated_remotely`, severity `warning`
+- `cancelled` -> `strategy_terminated_remotely`, severity `warning`
+- `failed` -> `strategy_terminated_remotely`, severity `error`
 
 ## Query lifecycle states
 
 Documented Auto status set (from `auto/agent-quickstart`, `v-2-auto.tag`):
 
-- **Live**: `active`, `recurring`
+- **Live**: `active`
+- **Unsupported by this bot**: `recurring` (documented live status, rejected locally)
 - **Terminal**: `triggered`, `expired`, `cancelled`, `failed`
 
-The supervisor treats live statuses as "keep SSE open"; terminal
-statuses cause the per-strategy task to exit cleanly after status sync.
+The supervisor treats `active` as "keep SSE open". Terminal statuses cause
+the per-strategy task to exit cleanly after status sync. `recurring` is
+treated as unsupported and mapped to local `failed` because this bot is
+single-fire only.
 
 ## Reconnect semantics
 

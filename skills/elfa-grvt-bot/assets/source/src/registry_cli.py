@@ -134,9 +134,9 @@ def _build_parser() -> argparse.ArgumentParser:
     add.add_argument("--price", type=float, default=None)
     add.add_argument("--leverage", type=int, default=None)
     add.add_argument("--tp-pct", type=float, default=None,
-                     help="take-profit percentage (e.g. 1.5 → 1.5%% from fill)")
+                     help="take-profit percentage (e.g. 1.5 -> 1.5%% from fill)")
     add.add_argument("--sl-pct", type=float, default=None,
-                     help="stop-loss percentage (e.g. 1.0 → 1.0%% from fill)")
+                     help="stop-loss percentage (e.g. 1.0 -> 1.0%% from fill)")
     add.add_argument("--time-in-force", default=None)
     add.add_argument("--reduce-only", action="store_true")
     add.add_argument("--max-notional-usd", type=float, required=True)

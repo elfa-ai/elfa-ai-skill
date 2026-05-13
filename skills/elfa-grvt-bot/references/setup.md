@@ -84,28 +84,11 @@ If you opt in, you need:
 
 #### Optional: wire `show_pending_alerts.sh` for hook-driven alerts
 
-The bundled `scripts/show_pending_alerts.sh` prints any unacked alerts on stdout (and auto-acks them after printing). Agents that support session-start, pre-prompt, or shell hooks can call this script so alerts surface automatically without the agent having to remember `AGENTS.md`.
+The bundled `scripts/show_pending_alerts.sh` prints any unacked alerts on stdout and prints the ack command to run after relaying them. Agents that support session-start, pre-prompt, or shell hooks can call this script so alerts surface automatically without the agent having to remember `AGENTS.md`.
 
 Examples:
 
-- **Claude Code** -- drop `.claude/settings.json` in the project root:
-  ```json
-  {
-    "hooks": {
-      "UserPromptSubmit": [
-        {
-          "hooks": [
-            {
-              "type": "command",
-              "command": "bash $CLAUDE_PROJECT_DIR/scripts/show_pending_alerts.sh"
-            }
-          ]
-        }
-      ]
-    }
-  }
-  ```
-- **Other agents** -- point your session-start or pre-prompt hook at `<project>/scripts/show_pending_alerts.sh`. The script self-locates its project root, reads `.env`, and exits silently if there is nothing to surface.
+- **Agent hooks** -- point your session-start or pre-prompt hook at `<project>/scripts/show_pending_alerts.sh`. The script self-locates its project root, reads `.env`, and exits silently if there is nothing to surface.
 
 The `AGENTS.md` instruction (poll on every session start) remains the agent-neutral baseline; the hook above is a faster, turn-driven alternative for clients that support it.
 
@@ -150,7 +133,7 @@ Follow `assets/source/docs/SMOKE_TEST.md`. It places a small live order with TP/
 
 ### 9. Author your first real strategy
 
-Open your preferred agent in the working directory (any agent that supports `AGENTS.md` or skills works -- Claude Code, OpenCode, Cursor, Codex, etc.).
+Open your preferred agent in the working directory (any agent that supports `AGENTS.md` or skills works).
 
 Tell the agent what you want, for example:
 > "Long 0.5 SOL_USDT_Perp at 20x leverage when 1h RSI dips below 30. TP 1.5%, SL 1%. Cap notional at $30."

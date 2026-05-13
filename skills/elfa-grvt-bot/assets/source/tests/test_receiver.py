@@ -15,6 +15,7 @@ import pytest
 
 from elfa_grvt_bot.alerts import AlertWriter
 from elfa_grvt_bot.config import Config
+from elfa_grvt_bot.elfa_client import ElfaStreamError
 from elfa_grvt_bot.grvt_executor import GrvtError, ErrorClass
 from elfa_grvt_bot.receiver import _process_fire, _strategy_loop
 from elfa_grvt_bot.registry import Registry, Strategy
@@ -492,6 +493,47 @@ async def test_strategy_loop_failed_status_emits_error_alert(tmp_path):
                   if a["category"] == "strategy_terminated_remotely"]
     assert len(terminated) == 1
     assert terminated[0]["severity"] == "error"
+
+
+async def test_strategy_loop_poll_auth_failure_marks_failed(tmp_path):
+    cfg, registry, executor, _, alerts = _setup(tmp_path, strategy=_strategy())
+
+    class _AuthFailElfa:
+        def get_query(self, query_id):
+            raise RuntimeError("elfa get_query failed: 401 bad key")
+
+        async def stream_notifications(self, query_id):
+            if False:
+                yield {}
+
+    await _strategy_loop(
+        "q_abc", config=cfg, registry=registry, elfa=_AuthFailElfa(),
+        executor=executor, alerts=alerts,
+    )
+    assert registry.get_strategy("q_abc").status == "failed"
+    pending = registry.list_alerts(only_unacked=True)
+    assert any("Elfa auth failed" in a["message"] for a in pending)
+
+
+async def test_strategy_loop_stream_auth_failure_marks_failed(tmp_path):
+    cfg, registry, executor, _, alerts = _setup(tmp_path, strategy=_strategy())
+
+    class _AuthFailElfa:
+        def get_query(self, query_id):
+            return {"queryId": query_id, "status": "active", "executions": []}
+
+        async def stream_notifications(self, query_id):
+            raise ElfaStreamError(403, "auto disabled")
+            if False:
+                yield {}
+
+    await _strategy_loop(
+        "q_abc", config=cfg, registry=registry, elfa=_AuthFailElfa(),
+        executor=executor, alerts=alerts,
+    )
+    assert registry.get_strategy("q_abc").status == "failed"
+    pending = registry.list_alerts(only_unacked=True)
+    assert any("Elfa auth failed" in a["message"] for a in pending)
 
 
 async def test_strategy_loop_unknown_status_marks_failed(tmp_path):

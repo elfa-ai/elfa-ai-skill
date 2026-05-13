@@ -1,6 +1,6 @@
 # elfa_grvt_bot - agent session bootstrap
 
-This project is the Elfa AUTO → GRVT trading bot.
+This project is the Elfa AUTO -> GRVT trading bot.
 
 The bot listens to Elfa Auto triggers via **per-query Server-Sent Events**
 (`GET /v2/auto/queries/:id/stream`). There is no inbound HTTP server, no
@@ -90,13 +90,15 @@ When the user describes a strategy:
 ## How fires arrive (live SSE only)
 
 The receiver (`python -m elfa_grvt_bot`) maintains one SSE connection per
-live strategy (status `active` or `recurring`). When Elfa's conditions
+locally active strategy. When Elfa's conditions
 evaluate true, the SSE stream emits `event: query.triggered` with the
 canonical event payload from `docs.elfa.ai/auto/notifications`
 (top-level fields: `eventId`, `eventType`, `version`, `timestamp`,
 `queryId`, `channel`, `trigger`, `evaluation`, `action`). The receiver
 keys idempotency on `eventId` and processes the fire; the strategy
-transitions to `fired`.
+transitions to `fired`. Recurring queries are not supported by this bot;
+if poll-query reports `recurring`, the local strategy is marked `failed`
+and the user is alerted.
 
 If the receiver was offline when a strategy triggered, the fire is not
 recovered automatically: SSE eventIds (`evt_xxx`) and poll-query

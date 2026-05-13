@@ -1,7 +1,7 @@
 # elfa_grvt_bot
 
-Elfa AUTO → GRVT trading bot. You describe strategies in natural language to
-Claude; Elfa Auto evaluates conditions; a long-running outbound consumer
+Elfa AUTO -> GRVT trading bot. You describe strategies in natural language to
+your agent; Elfa Auto evaluates conditions; a long-running outbound consumer
 subscribes to per-query SSE streams and places GRVT orders when conditions
 fire.
 
@@ -25,12 +25,12 @@ Copy `.env.example` to `.env` and fill in:
   not needed because this bot only creates notify-style Auto queries
   (`Notify me when: ...`); trade-flavoured actions would require HMAC.
 - **GRVT**: `GRVT_API_KEY`, `GRVT_PRIVATE_KEY`, `GRVT_TRADING_ACCOUNT_ID`
-  (from GRVT → Settings → API Keys). `GRVT_ENV=prod` is the project default.
+  (from GRVT Settings, API Keys). `GRVT_ENV=prod` is the project default.
 - **Telegram**: `TELEGRAM_BOT_TOKEN` (from `@BotFather`), `TELEGRAM_CHAT_ID`
   (your personal chat with the bot).
 - **Receiver**: `REGISTRY_DB_PATH` defaults to `./registry.db`. Symbol
   validity is delegated to GRVT itself; if you author a strategy on a
-  symbol GRVT doesn't list, Claude flags it during authoring (and the
+  symbol GRVT doesn't list, the agent flags it during authoring (and the
   receiver's mid-price fetch fails fast at fire time as a backstop).
 
 Source it:
@@ -52,17 +52,17 @@ registry every ~5s). Trigger Ctrl-C to stop.
 
 ### 4. Author a strategy
 
-In a separate terminal, open Claude Code in this directory:
+In a separate terminal, open your preferred agent in this directory:
 ```bash
-claude
+<your-agent-command>
 ```
 
-Tell Claude what you want, e.g.:
+Tell the agent what you want, e.g.:
 > "Notify me when 1h RSI on BTC dips below 30. Buy 0.05 BTC perp market on
 > GRVT prod, cap notional at $4000."
 
-Claude follows the flow in `CLAUDE.md`: forwards to Elfa Builder Chat as a
-"Notify me when…" prompt, validates the EQL, asks for any missing GRVT
+The agent follows the flow in `AGENTS.md`: forwards to Elfa Builder Chat as a
+"Notify me when..." prompt, validates the EQL, asks for any missing GRVT
 order params, shows the full plan, and waits for your "yes" before creating
 the Auto query and writing the registry row.
 
@@ -72,7 +72,7 @@ When the condition triggers, the receiver sees the SSE notification, runs
 guardrails, places the GRVT order (with TP/SL if configured), and pushes
 two Telegram messages: a "trigger received" ping in parallel with order
 placement, then an "order placed" / "tpsl_armed" confirmation. Failures
-get a Telegram alert too, and Claude will surface anything you missed at
+get a Telegram alert too, and the agent will surface anything you missed at
 the start of your next chat session.
 
 ## Production deploy (Fly.io / Railway / Render / VPS)
@@ -94,7 +94,7 @@ fly volumes create registry --size 1
 fly deploy
 ```
 
-Author strategies via Claude as usual - the registry is the shared
+Author strategies via your agent as usual - the registry is the shared
 hand-off point. If your authoring environment and the receiver write to
 different `registry.db` files, they need to agree on the same database for
 the receiver to know about new strategies.

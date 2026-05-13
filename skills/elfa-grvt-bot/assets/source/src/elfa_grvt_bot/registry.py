@@ -116,7 +116,7 @@ class Registry:
             con.execute("PRAGMA journal_mode=WAL")
             con.executescript(SCHEMA)
             # Migrations for pre-existing dev DBs that were created before
-            # tp_pct / sl_pct existed. ALTER TABLE … ADD COLUMN is idempotent
+            # tp_pct / sl_pct existed. ALTER TABLE ... ADD COLUMN is idempotent
             # via the duplicate-column OperationalError catch.
             for column in ("tp_pct", "sl_pct"):
                 try:

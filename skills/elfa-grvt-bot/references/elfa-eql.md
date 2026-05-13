@@ -182,7 +182,7 @@ All three must be true at the same eval. This is a classic oversold-bounce-with-
 
 ## Validation
 
-Always validate before creating. The bot's `ElfaClient.validate_query()` method calls `POST /v2/auto/queries/validate` and returns `{valid, errors, warnings, simulationLlmCallsEstimate, estimatedCredits, wouldTriggerNow}`. If `valid: false`, surface the errors to the user; do not call `create_query`.
+Always validate before creating. The bot's `ElfaClient.validate_query()` method calls `POST /v2/auto/queries/validate` and returns `{valid, errors, warnings, estimatedCost, simulationLlmCallsEstimate}`. If `valid: false`, surface the errors to the user; do not call `create_query`. `wouldTriggerNow` lives on poll-query's `latestEvaluation`, not validate.
 
 ## Convention: keep query content ASCII-only
 

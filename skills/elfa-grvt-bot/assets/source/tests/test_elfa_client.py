@@ -1,3 +1,5 @@
+import json
+
 import pytest
 import responses
 
@@ -110,7 +112,11 @@ def test_create_query_sends_api_key_only():
     body = {
         "title": "BTC dip",
         "description": "buy BTC on RSI dip",
-        "query": {"conditions": {}, "actions": [], "expiresIn": "24h"},
+        "query": {
+            "conditions": {},
+            "actions": [{"stepId": "step_1", "type": "notify", "params": {}}],
+            "expiresIn": "24h",
+        },
     }
     canonical = {
         "queryId": "q_abc",
@@ -124,6 +130,65 @@ def test_create_query_sends_api_key_only():
         out = _client().create_query(body)
         assert out["queryId"] == "q_abc"
         _assert_api_key_only(rm.calls[0].request)
+
+
+def test_create_query_rejects_trade_action_before_http():
+    action = {"stepId": "step_1", "type": "market_order"}
+    body = {
+        "title": "BTC trade",
+        "description": "bad action",
+        "query": {"conditions": {}, "actions": [action]},
+    }
+    with pytest.raises(ValueError, match="notify-style actions only"):
+        _client().create_query(body)
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        {"stepId": "step_1", "type": "telegram_bot", "params": {}},
+        {"stepId": "step_1", "type": "webhook", "params": {}},
+        {
+            "stepId": "step_1",
+            "type": "llm",
+            "params": {"callback": {"action": {"type": "notify"}}},
+        },
+    ],
+)
+def test_create_query_allows_notify_style_actions(action):
+    body = {
+        "title": "BTC alert",
+        "description": "notify action",
+        "query": {
+            "conditions": {},
+            "actions": [action],
+        },
+    }
+    with responses.RequestsMock() as rm:
+        rm.post(
+            "https://api.elfa.ai/v2/auto/queries",
+            json={"queryId": "q_ok", "status": "active", "cost": {}},
+            status=201,
+        )
+        out = _client().create_query(body)
+        assert out["queryId"] == "q_ok"
+
+
+def test_create_query_rejects_llm_trade_callback_before_http():
+    body = {
+        "title": "BTC trade",
+        "description": "bad callback",
+        "query": {
+            "conditions": {},
+            "actions": [{
+                "stepId": "step_1",
+                "type": "llm",
+                "params": {"callback": {"action": {"type": "limit_order"}}},
+            }],
+        },
+    }
+    with pytest.raises(ValueError, match="notify-style actions only"):
+        _client().create_query(body)
 
 
 def test_cancel_query_posts_to_cancel_subpath():
@@ -180,6 +245,22 @@ async def _collect(aiter):
     return out
 
 
+def _event_json(query_id="q_1", event_id="evt_1", **overrides):
+    payload = {
+        "version": "1.0",
+        "eventType": "query.triggered",
+        "eventId": event_id,
+        "timestamp": "2026-04-01T12:00:00.000Z",
+        "queryId": query_id,
+        "channel": "sse",
+        "trigger": {"symbol": "BTC"},
+        "evaluation": {"triggered": True},
+        "action": {"type": "notify"},
+    }
+    payload.update(overrides)
+    return json.dumps(payload, separators=(",", ":"))
+
+
 async def test_stream_notifications_parses_canonical_query_triggered_frame():
     """Live SSE wire format per docs.elfa.ai auto/notifications:
 
@@ -212,23 +293,34 @@ async def test_stream_notifications_parses_canonical_query_triggered_frame():
     assert events[0]["data"]["queryId"] == "q_1"
 
 
-async def test_stream_notifications_falls_back_to_sse_id_line():
-    """The published wire example has the SSE `id:` line and `data.eventId`
-    set to the same value. We still consult both: if the JSON payload is
-    malformed or missing eventId (defensive), the SSE protocol id is the
-    fallback so we don't return event_id=None into the dedupe layer."""
+async def test_stream_notifications_requires_payload_event_id_even_with_sse_id():
+    """data.eventId is the canonical dedupe key. The SSE `id:` line is
+    checked for consistency only; it is never a fallback identifier."""
     lines = [
         "event: query.triggered",
         "id: evt_fallback",
-        'data: {"queryId":"q_2","channel":"sse"}',
+        f'data: {_event_json("q_2", "evt_fallback", eventId=None)}',
         "",
     ]
     fake = _FakeAsyncClient(_FakeStreamResponse(200, lines))
     events = await _collect(
         _client().stream_notifications("q_2", http_client=fake)
     )
-    assert len(events) == 1
-    assert events[0]["event_id"] == "evt_fallback"
+    assert events == []
+
+
+async def test_stream_notifications_drops_sse_id_mismatch():
+    lines = [
+        "event: query.triggered",
+        "id: evt_line",
+        f'data: {_event_json("q_2", "evt_payload")}',
+        "",
+    ]
+    fake = _FakeAsyncClient(_FakeStreamResponse(200, lines))
+    events = await _collect(
+        _client().stream_notifications("q_2", http_client=fake)
+    )
+    assert events == []
 
 
 async def test_stream_notifications_accepts_legacy_notification_event_type():
@@ -238,7 +330,7 @@ async def test_stream_notifications_accepts_legacy_notification_event_type():
     lines = [
         "event: notification",
         "id: evt_legacy",
-        'data: {"eventId":"evt_legacy","queryId":"q_3"}',
+        f'data: {_event_json("q_3", "evt_legacy")}',
         "",
     ]
     fake = _FakeAsyncClient(_FakeStreamResponse(200, lines))
@@ -317,12 +409,11 @@ async def test_stream_notifications_drops_frame_with_unparsable_json():
 
 
 async def test_stream_notifications_drops_frame_without_eventId_or_sse_id():
-    """Without either an eventId or an SSE `id:` line we have no dedupe
-    key; the parser must drop the frame rather than yield event_id=None
-    (which would collide on the fires PK)."""
+    """Without data.eventId we have no canonical dedupe key. Drop rather
+    than yield event_id=None, which would collide on the fires PK."""
     lines = [
         "event: query.triggered",
-        'data: {"queryId":"q_noid","channel":"sse"}',
+        f'data: {_event_json("q_noid", "", eventId=None)}',
         "",
     ]
     fake = _FakeAsyncClient(_FakeStreamResponse(200, lines))
@@ -338,7 +429,7 @@ async def test_stream_notifications_drops_frame_when_queryId_mismatches():
     lines = [
         "event: query.triggered",
         "id: evt_wrong_query",
-        'data: {"eventId":"evt_wrong_query","queryId":"q_OTHER"}',
+        f'data: {_event_json("q_OTHER", "evt_wrong_query")}',
         "",
     ]
     fake = _FakeAsyncClient(_FakeStreamResponse(200, lines))
@@ -354,11 +445,11 @@ async def test_stream_notifications_concatenates_multiline_data():
     lines = [
         "event: query.triggered",
         "id: evt_multi",
-        'data: {"eventId":"evt_multi",',
-        'data: "queryId":"q_ml",',
-        'data: "channel":"sse"}',
-        "",
     ]
+    lines.extend(f"data: {line}" for line in json.dumps(
+        json.loads(_event_json("q_ml", "evt_multi")), indent=2,
+    ).splitlines())
+    lines.append("")
     fake = _FakeAsyncClient(_FakeStreamResponse(200, lines))
     events = await _collect(
         _client().stream_notifications("q_ml", http_client=fake)
@@ -376,7 +467,7 @@ async def test_stream_notifications_skips_keep_alive_comment_lines():
         ": another keep-alive",
         "event: query.triggered",
         "id: evt_ka",
-        'data: {"eventId":"evt_ka","queryId":"q_ka"}',
+        f'data: {_event_json("q_ka", "evt_ka")}',
         "",
         ": ping",
     ]
@@ -386,3 +477,31 @@ async def test_stream_notifications_skips_keep_alive_comment_lines():
     )
     assert len(events) == 1
     assert events[0]["event_id"] == "evt_ka"
+
+
+async def test_stream_notifications_drops_missing_required_payload_fields():
+    lines = [
+        "event: query.triggered",
+        "id: evt_missing",
+        'data: {"eventType":"query.triggered","eventId":"evt_missing","queryId":"q_missing"}',
+        "",
+    ]
+    fake = _FakeAsyncClient(_FakeStreamResponse(200, lines))
+    events = await _collect(
+        _client().stream_notifications("q_missing", http_client=fake)
+    )
+    assert events == []
+
+
+async def test_stream_notifications_drops_non_notify_action():
+    lines = [
+        "event: query.triggered",
+        "id: evt_trade",
+        f'data: {_event_json("q_trade", "evt_trade", action={"type": "market_order"})}',
+        "",
+    ]
+    fake = _FakeAsyncClient(_FakeStreamResponse(200, lines))
+    events = await _collect(
+        _client().stream_notifications("q_trade", http_client=fake)
+    )
+    assert events == []

@@ -5,54 +5,26 @@ High-level design of the elfa-grvt-bot.
 ## Two surfaces
 
 ```
-┌─────────────────────────────┐
-│  USER (chat with agent)     │
-│  describes a strategy       │
-└──────────────┬──────────────┘
-               │
-               ▼
-┌─────────────────────────────┐         ┌──────────────────────────┐
-│  AGENT SESSION              │ ──────▶ │  Elfa Builder Chat       │
-│  + this skill               │ ◀────── │  POST /v2/auto/chat      │
-│  + grvt-trading skill       │         └──────────────────────────┘
-│  (read-only sanity checks)  │
-└──────────────┬──────────────┘
-               │  on user "yes":
-               │   POST /v2/auto/queries (API-key auth)
-               │   then registry_cli.py add
-               ▼
-┌─────────────────────────────┐
-│  Local SQLite registry      │   strategies, fires, alerts tables
-│  (registry.db)              │   shared by agent session + receiver
-└──────────────┬──────────────┘
-               │
-   ┌───────────▼──────────────────────────────────────────┐
-   │  ELFA AUTO (managed condition engine)                 │
-   │  evaluates conditions; exposes per-query SSE stream   │
-   │  GET /v2/auto/queries/:id/stream  (notification fire) │
-   │  GET /v2/auto/queries/:id         (poll, status only) │
-   └───┬──────────────────────────────────────────────────┘
-       │  outbound pull (SSE + REST)
-       ▼
-┌────────────────────────────────────────────────┐
-│  RECEIVER (always-on outbound consumer)        │
-│  supervisor: polls registry every ~5s,         │
-│  spawns one async SSE task per active strategy │
-│  1. dedupe by eventId (INSERT OR IGNORE)       │
-│  2. lookup strategy in registry                │
-│  3. silent status check                        │
-│  4. spawn Telegram alert in background         │
-│  5. fetch_mid_price                            │
-│  6. guardrails (env, notional cap)             │
-│  7. set_leverage (best-effort)                 │
-│  8. POST full/v2/bulk_orders OTOCO             │
-│     (parent + TP + SL atomic)                  │
-│  9. emit success or error alert                │
-└──────────────┬─────────────────────────────────┘
-               ▼
-┌─────────────────────────────┐    ┌────────────────────┐
-│  GRVT (default: prod)       │    │  Telegram chat     │
-└─────────────────────────────┘    └────────────────────┘
+USER (chat with agent)
+  -> AGENT SESSION (this skill + grvt-trading sanity checks)
+  -> Elfa Builder Chat (POST /v2/auto/chat)
+  -> user approves with "yes"
+  -> POST /v2/auto/queries (API-key auth)
+  -> registry_cli.py add
+  -> Local SQLite registry (strategies, fires, alerts)
+  -> RECEIVER (always-on outbound consumer)
+     - polls registry every ~5s
+     - opens one SSE task per active strategy
+     - dedupes by eventId (INSERT OR IGNORE)
+     - looks up strategy in registry
+     - checks remote status
+     - spawns Telegram alert in background
+     - fetches mid price
+     - runs guardrails (env, notional cap)
+     - sets leverage (best-effort)
+     - POSTs full/v2/bulk_orders OTOCO
+     - emits success or error alert
+  -> GRVT prod and optional Telegram chat
 ```
 
 ## Module breakdown
@@ -96,7 +68,8 @@ High-level design of the elfa-grvt-bot.
 Documented Auto status set (`docs.elfa.ai/auto/agent-quickstart`,
 `v-2-auto.tag`):
 
-- **Live**: `active`, `recurring`
+- **Live**: `active`
+- **Unsupported by this bot**: `recurring` (documented live status, rejected locally)
 - **Terminal**: `triggered`, `expired`, `cancelled`, `failed`
 
 ```
@@ -119,7 +92,7 @@ Documented Auto status set (`docs.elfa.ai/auto/agent-quickstart`,
 
 When poll-query reports a terminal remote status, the supervisor reconciles the local status and emits an alert. It does NOT replay missed executions through the order path (see "REST is status-only" below). The per-strategy SSE task exits cleanly on the next reconcile cycle.
 
-Single-fire by design for `active`. `recurring` queries keep the SSE stream open across triggers until a documented terminal status is observed.
+Single-fire by design. `recurring` is documented by Elfa as a live status, but this bot rejects it to local `failed` because it cannot safely dedupe repeated fires across SSE `eventId` and poll-query `exec_xxx` namespaces.
 
 ## Notification channels
 
@@ -133,7 +106,7 @@ The three alerts a normal fire produces:
 
 Two delivery channels read from the registry:
 
-- **In-chat (via `AGENTS.md`).** Generated `AGENTS.md` instructs the agent to run `python src/registry_cli.py alerts --pending` on every session start and surface unacked alerts before doing anything else. After surfacing, the agent runs `python -m registry_cli ack all` to clear the queue. Agents that support session-start or per-prompt hooks can wire `scripts/show_pending_alerts.sh` for automatic injection - see your agent's docs.
+- **In-chat (via `AGENTS.md`).** Generated `AGENTS.md` instructs the agent to run `python src/registry_cli.py alerts --pending` on every session start and surface unacked alerts before doing anything else. After surfacing, the agent asks the user to say `ack <id>` or `ack all`; then it runs `python src/registry_cli.py ack <id-or-all>`. Agents that support session-start or per-prompt hooks can wire `scripts/show_pending_alerts.sh` for automatic injection - see your agent's docs.
 - **Telegram (optional, real-time push).** When configured, `AlertWriter.emit()` calls `telegram_sender.send()` synchronously after the registry write. When unconfigured, it is silently skipped - no error, no retry queue. Telegram exceptions never bubble up; they're logged as warnings so a flaky bot can't break order placement.
 
 This dual design means the user always gets alerts in chat (free, no extra credentials), and optionally also gets push notifications on their phone for real-time visibility while away from the agent.

@@ -174,6 +174,13 @@ async def _strategy_loop(
                     reason="query no longer exists on Elfa (404)",
                 )
                 return
+            if status_code in (401, 403):
+                await _sync_terminal_status_locally(
+                    query_id, remote_status="failed",
+                    executions=[], registry=registry, alerts=alerts,
+                    reason=f"Elfa auth failed during poll-query ({status_code})",
+                )
+                return
             logger.warning("poll-query failed for %s: %r", query_id, e)
             await asyncio.sleep(backoff)
             backoff = min(backoff * 2, backoff_max)
@@ -214,6 +221,13 @@ async def _strategy_loop(
                     query_id, remote_status="cancelled",
                     executions=[], registry=registry, alerts=alerts,
                     reason="query no longer exists on Elfa (404)",
+                )
+                return
+            if e.status_code in (401, 403):
+                await _sync_terminal_status_locally(
+                    query_id, remote_status="failed",
+                    executions=[], registry=registry, alerts=alerts,
+                    reason=f"Elfa auth failed during SSE stream ({e.status_code})",
                 )
                 return
             logger.warning("SSE stream error for %s: %r; backoff %.1fs",

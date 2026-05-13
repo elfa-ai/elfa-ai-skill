@@ -24,7 +24,7 @@ def _strategy(**overrides) -> Strategy:
 def test_allow_when_within_caps():
     r = check_guardrails(
         strategy=_strategy(),
-        current_mid=60000.0,  # notional = 60000 * 0.05 = 3000 ≤ 4000
+        current_mid=60000.0,  # notional = 60000 * 0.05 = 3000 <= 4000
         receiver_env="prod",
     )
     assert isinstance(r, Allow)
@@ -60,6 +60,6 @@ def test_reject_inactive_strategy():
     )
     assert isinstance(r, Reject)
     # guardrail_status (not guardrail_rejected) so the receiver can log-only
-    # , see spec §6: status mismatches are logs-only, no Telegram spam on retries
+    # , see spec section 6: status mismatches are logs-only, no Telegram spam on retries
     assert r.category == "guardrail_status"
     assert "status" in r.reason.lower()

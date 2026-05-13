@@ -36,7 +36,7 @@ def test_send_returns_false_on_http_error():
 def test_send_returns_false_on_network_error():
     sender = TelegramSender(bot_token="bot_test", chat_id="12345")
     with responses.RequestsMock() as rm:
-        # no response registered → ConnectionError
+        # no response registered -> ConnectionError
         ok = sender.send("hello")
         assert ok is False
 

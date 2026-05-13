@@ -13,7 +13,7 @@
 # - exits 0 silently if there's nothing to report (no alerts, no DB yet,
 #     missing env, registry_cli not importable)
 # - never blocks the user prompt (stderr swallowed, errors non-fatal)
-# - auto-acks alerts after printing so the same item isn't repeated
+# - prints the ack command after alerts so the agent can clear them explicitly
 
 set -u
 
