@@ -8,11 +8,13 @@ user gets a `manual_intervention_required` alert via the poll-query
 status check on next start. Recurring queries are not supported by this
 bot (the authoring flow forbids them).
 
-Why poll-query is status-only:
-  SSE `eventId` (evt_xxx) and poll-query `executions[i].id` (exec_xxx)
-  are different identifier namespaces per docs.elfa.ai/auto/notifications
-  and docs.elfa.ai/api/rest/auto-poll-query-v-2. Cross-channel dedupe
-  is unsafe.
+Cross-channel dedupe key:
+  SSE payload `executionId` matches poll-query `executions[i].id`
+  (same UUID namespace, verified against api.elfa.ai 2026-05-13).
+  The receiver uses `executionId` as the canonical idempotency key
+  for both SSE delivery and poll-query reconciliation, so a fire
+  delivered live via SSE and then re-observed via poll-query will
+  not be processed twice.
 """
 
 from __future__ import annotations

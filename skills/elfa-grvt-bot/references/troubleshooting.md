@@ -43,6 +43,37 @@ python -m elfa_grvt_bot
 
 On restart the supervisor calls `GET /v2/auto/queries/:id` (poll-query) for each registered active strategy to reconcile status. If a strategy already triggered while the receiver was offline, the bot does NOT replay it as a fire (SSE `eventId` and poll-query `executions[i].id` are different identifier namespaces per the docs -- cross-channel dedupe is unsafe). Instead it emits a `manual_intervention_required` alert so you review the GRVT side manually. To minimize this window, run the receiver under systemd or a PaaS auto-restarter.
 
+## During preflight or first GRVT order (auth failures)
+
+### `bulk_orders failed: code=1000: You need to authenticate prior to using this functionality`
+
+The receiver got an SSE trigger and successfully fetched the GRVT
+mid-price, but order placement returned 401. Two distinct root causes
+both manifest as this same error:
+
+1. **Geo-block.** Run `curl -sX POST https://edge.grvt.io/auth/api_key/login -H 'Content-Type: application/json' -d "{\"api_key\":\"$GRVT_API_KEY\"}"`. If the body is `{"error":"Access from this location is not allowed.","status":"failure"}`, GRVT rejects your outbound IP region. Deploy from an allowed region (Fly.io `iad`, AWS `us-east-1`, any VPS in a non-blocked country) or run the bot behind a VPN. The grvt-python-sdk reports this as `'NoneType' object has no attribute 'items'` because it sees HTTP 200 but no `Set-Cookie: gravity=...`. Run `python scripts/preflight.py` to surface the actual error message.
+
+2. **Invalid / rotated API key.** Same `_get_cookie` symptom but the body says something like `{"error":"invalid api key"}`. Re-generate on the GRVT UI (Settings -> API Keys) and update `.env`.
+
+`scripts/preflight.py` probes this at install time so the failure surfaces in 1 second instead of at first fire (which costs a full 5-minute strategy cycle to discover). If preflight passed but order placement now fails, check whether you rotated keys or moved the receiver to a different region.
+
+### `dropping SSE 'notification' frame: missing fields [...]`
+
+Schema drift from Elfa. The parser expects a specific set of fields
+(see `references/elfa-sse.md` and the captured-frames fixtures). When
+Elfa changes the wire format, the parser refuses to act on
+unverifiable data and drops the frame.
+
+Recovery path:
+1. Capture a fresh production frame: `python scripts/capture_frame.py` (writes to `references/captured-frames/`).
+2. Diff against the existing fixture in `references/captured-frames/`.
+3. If the new shape is missing previously-required fields, update `_REQUIRED_EVENT_FIELDS` in `src/elfa_grvt_bot/elfa_client.py` and the parser branches in `_build_event`. Reload the receiver. File an upstream issue.
+
+The fail-closed behaviour is correct - we'd rather drop a fire and
+manually intervene than execute on a payload we can't verify. The
+manual-intervention alert raised via poll-query reconciliation is your
+safety net.
+
 ## On SSE stream connection (in receiver logs)
 
 ### `401 Unauthorized` on stream open

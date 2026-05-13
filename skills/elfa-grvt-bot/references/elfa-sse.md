@@ -25,80 +25,97 @@ A 410 on connect means the query was already in a terminal status when the
 request arrived. The bot's `_strategy_loop` then falls back to the
 poll-query endpoint for status reconciliation.
 
-## Canonical event payload
+## Production event payload
 
-Per `auto/notifications` the SSE frame for a trigger looks like:
+Captured 2026-05-13 against `api.elfa.ai` (see
+`references/captured-frames/notification_*_2026-05-13.txt` for the
+exact bytes). The actual wire format is flatter than the canonical
+envelope `docs.elfa.ai/auto/notifications` describes, and the
+canonical envelope fields (`version`, `eventType`, `eventId`,
+`channel`, `trigger`, `evaluation`, `action`) are NOT emitted today.
+The parser is locked to production, not to the spec.
 
 ```
-event: query.triggered
-id: evt_01J...
-data: {"version":"1.0","eventType":"query.triggered","eventId":"evt_01J...","timestamp":"2026-04-01T12:00:00.000Z","queryId":"q_123","channel":"sse","trigger":{"symbol":"BTC","reason":"price > threshold"},"evaluation":{"triggered":true},"action":{"type":"notify"}}
+event: notification
+id: <sse-level uuid>
+data: {"status":"triggered","queryId":"<uuid>","executionId":"<uuid>","triggerTime":"2026-...Z","timestamp":<epoch_ms>,"title":"Auto Plan Alert","body":"...","message":"...","conditionsMet":<int>, ...}
 ```
 
-Top-level JSON fields:
+Required JSON fields the parser checks for (any missing -> drop with WARNING):
 
-- `version` (e.g. `"1.0"`)
-- `eventType` (`"query.triggered"`)
-- `eventId` (`"evt_01J..."`) -- **canonical idempotency key**
-- `timestamp` (ISO 8601)
-- `queryId`
-- `channel` (`"sse"` here; `"webhook"` for the webhook channel; etc.)
-- `trigger` (per-condition payload, e.g. `{"symbol":"BTC","reason":"..."}`)
-- `evaluation` (`{"triggered":true}`)
-- `action` (`{"type":"notify"}` for notify-style queries)
+- `status` (must equal `"triggered"`)
+- `queryId` (must match the stream URL's query id)
+- `executionId` -- **canonical idempotency key**
+- `triggerTime` (ISO 8601)
 
-The SSE protocol `id:` line carries the same value as `data.eventId` per
-the published example. The bot treats `data.eventId` as the only
-idempotency key. If `id:` is present and differs from `data.eventId`, or
-if `data.eventId` is missing, the frame is dropped.
+Informational fields (passed through, not required):
+
+- `timestamp` (epoch ms, mirrors `triggerTime`)
+- `title`, `body`, `message` -- human-readable strings from the
+  notify action template Builder Chat emits
+- `queryTitle`, `queryDisplayTitle`, `queryIdShort`, `autoDetails`
+- `conditionsMet` (integer count, `1` for `cron.once`,
+  `price.current`, etc. observed in production)
+
+The SSE protocol `id:` line carries an SSE-level UUID that is NOT
+the same as `executionId`. The bot keys idempotency on `executionId`
+from the `data:` payload; the `id:` line is ignored.
+
+If Elfa rolls out the documented canonical envelope (`event:
+query.triggered` with `eventId`/`channel`/`trigger`/etc.), the parser
+accepts both `event: notification` and `event: query.triggered`. New
+fields are tolerated. Adding new required fields to the schema is the
+breaking case; re-capture and update the parser when that happens.
 
 ## Dedupe key
 
-`eventId` is the idempotency primitive across delivery channels per the
-docs ("Deduplicate by `eventId`", `auto/notifications`). The bot uses it
-as the primary key in the local `fires` table.
-
-Note: this is a different identifier namespace from `executions[i].id`
-returned by `GET /v2/auto/queries/:id` (poll-query). Those are internal
-Athena execution records (`exec_xxx`), not Auto event IDs. The bot does
-**not** dedupe SSE fires against poll-query executions for that reason --
-see the next section.
+`executionId` is the canonical idempotency primitive. Same UUID
+namespace as `executions[i].id` from `GET /v2/auto/queries/:id`
+(verified against production 2026-05-13), so it is safe to dedupe
+across SSE delivery and poll-query reconciliation. The bot uses it as
+the primary key in the local `fires` table.
 
 ## Poll-query (`GET /v2/auto/queries/:id`)
 
-Used for status reconciliation only -- never for replaying fires through
-the order-placement path.
+Used for status reconciliation and as the secondary observation
+channel for fires that arrived while the receiver was offline.
 
-Response shape (per `api/rest/auto-poll-query-v-2`):
+Response shape:
 
 ```json
 {
   "queryId": "q_123",
   "status": "active",
   "latestEvaluation": {
-    "evaluatedAt": "2026-04-01T12:00:00.000Z",
+    "evaluatedAt": "2026-05-13T06:53:25.000Z",
     "wouldTriggerNow": false
   },
   "executions": [
     {
-      "id": "exec_xxx",
+      "id": "94631fa0-05db-482a-9040-cfbaf13ece71",
       "queryId": "q_123",
-      "type": "notify",
+      "type": "notification",
       "status": "success",
-      "createdAt": "2026-04-01T12:00:01.000Z"
+      "createdAt": "2026-05-13T06:53:25.405Z"
     }
   ]
 }
 ```
 
-The bot calls this on startup and after each SSE disconnect to learn the
-authoritative remote status. If the remote status is terminal AND the
-local strategy is still `active`, the bot syncs the local status and
-emits an alert:
+`executions[i].id` is the same UUID namespace as the SSE payload's
+`executionId` (verified production 2026-05-13). The bot can therefore
+dedupe SSE fires against poll-query executions safely if needed.
 
-- `triggered` + executions while we were offline -> `manual_intervention_required`
-  (we cannot safely replay because `executions[i].id` is not the same
-  namespace as SSE `eventId`; the user reviews the GRVT side manually)
+The bot calls this on startup and after each SSE disconnect to learn
+the authoritative remote status. If the remote status is terminal AND
+the local strategy is still `active`:
+
+- `triggered` + at least one execution while we were offline
+  -> `manual_intervention_required` (the trigger may be stale by the
+  time the receiver reconnects and prices have moved; the user
+  reviews the GRVT side manually)
+- `triggered` + the execution was already processed live via SSE
+  -> alert suppressed (dedupe by `executionId`)
 - `expired` -> `strategy_terminated_remotely`, severity `info`
 - `cancelled` -> `strategy_terminated_remotely`, severity `warning`
 - `failed` -> `strategy_terminated_remotely`, severity `error`

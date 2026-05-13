@@ -1,0 +1,4 @@
+id: 1b52d892-ba80-42d8-b421-36586410f23b
+event: notification
+data: {"status":"triggered","title":"Auto Plan Alert","body":"probe fire","message":"probe fire","queryId":"25bd0932-be09-4e80-913f-efcfa1567d22","queryTitle":"SSE capture probe v2","autoDetails":"Debug capture of raw SSE frames; do not register locally.","executionId":"94631fa0-05db-482a-9040-cfbaf13ece71","triggerTime":"2026-05-13T06:53:25.405Z","queryIdShort":"25bd0932","conditionsMet":1,"queryDisplayTitle":"SSE capture probe v2 [25bd0932]","timestamp":1778655205405}
+

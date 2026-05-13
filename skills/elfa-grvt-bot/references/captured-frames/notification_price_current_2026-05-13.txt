@@ -1,0 +1,4 @@
+id: 2dda077f-acdf-4024-996c-2fff40c5a642
+event: notification
+data: {"status":"triggered","title":"Auto Plan Alert","body":"BTC price is greater than $50,000.","message":"BTC price is greater than $50,000.","queryId":"359cd110-9cb6-4be6-ac16-99401d13d998","queryTitle":"SSE capture: BTC price probe","autoDetails":"Debug capture, always-true threshold.","executionId":"354df2b8-913d-4c26-afce-9a80bb0955d0","triggerTime":"2026-05-13T06:56:57.792Z","queryIdShort":"359cd110","conditionsMet":1,"queryDisplayTitle":"SSE capture: BTC price probe [359cd110]","timestamp":1778655417792}
+

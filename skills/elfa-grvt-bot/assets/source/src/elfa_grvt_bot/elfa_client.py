@@ -22,18 +22,8 @@ class ElfaStreamError(RuntimeError):
 
 
 _TRIGGER_EVENT_TYPES = ("query.triggered", "notification")
-_CANONICAL_EVENT_TYPE = "query.triggered"
-_REQUIRED_EVENT_FIELDS = (
-    "version",
-    "eventType",
-    "eventId",
-    "timestamp",
-    "queryId",
-    "channel",
-    "trigger",
-    "evaluation",
-    "action",
-)
+_REQUIRED_EVENT_FIELDS = ("queryId", "executionId", "triggerTime", "status")
+_TRIGGER_STATUS = "triggered"
 _NOTIFY_ACTION_TYPES = {"notify", "telegram_bot", "webhook"}
 
 
@@ -91,6 +81,15 @@ def _build_event(
     data: Optional[str],
     expected_query_id: str,
 ) -> Optional[dict]:
+    # Production schema (captured 2026-05-13 against api.elfa.ai):
+    #   event: notification
+    #   id: <sse-level uuid>
+    #   data: {"status":"triggered","queryId":"<uuid>","executionId":"<uuid>",
+    #          "triggerTime":"2026-...Z","timestamp":<epoch_ms>,
+    #          "title":..,"body":..,"message":..,"conditionsMet":<int>, ...}
+    # `executionId` is the dedupe key and matches poll-query's
+    # `executions[i].id`, so it is safe to use as canonical idempotency
+    # key across both channels.
     if event_type not in _TRIGGER_EVENT_TYPES:
         return None
     if not data:
@@ -108,44 +107,18 @@ def _build_event(
     if missing:
         logger.warning("dropping SSE %r frame: missing fields %s", event_type, missing)
         return None
-    if payload.get("eventType") != _CANONICAL_EVENT_TYPE:
+    if payload.get("status") != _TRIGGER_STATUS:
         logger.warning(
-            "dropping SSE %r frame: payload eventType %r != %r",
-            event_type,
-            payload.get("eventType"),
-            _CANONICAL_EVENT_TYPE,
+            "dropping SSE %r frame: status %r != %r",
+            event_type, payload.get("status"), _TRIGGER_STATUS,
         )
         return None
-    if not isinstance(payload.get("version"), str) or not payload.get("version"):
-        logger.warning("dropping SSE %r frame: invalid version", event_type)
+    execution_id = payload.get("executionId")
+    if not isinstance(execution_id, str) or not execution_id:
+        logger.warning("dropping SSE %r frame: invalid executionId", event_type)
         return None
-    if not isinstance(payload.get("timestamp"), str) or not payload.get("timestamp"):
-        logger.warning("dropping SSE %r frame: invalid timestamp", event_type)
-        return None
-    if payload.get("channel") != "sse":
-        logger.warning(
-            "dropping SSE %r frame: payload channel %r != 'sse'",
-            event_type,
-            payload.get("channel"),
-        )
-        return None
-    if not isinstance(payload.get("trigger"), dict):
-        logger.warning("dropping SSE %r frame: invalid trigger", event_type)
-        return None
-    if not isinstance(payload.get("evaluation"), dict):
-        logger.warning("dropping SSE %r frame: invalid evaluation", event_type)
-        return None
-    event_id = payload.get("eventId")
-    if not isinstance(event_id, str) or not event_id:
-        logger.warning("dropping SSE %r frame: invalid eventId", event_type)
-        return None
-    if sse_id and sse_id != event_id:
-        logger.warning(
-            "dropping SSE %r frame: SSE id %r != data.eventId %r",
-            event_type,
-            sse_id,
-            event_id,
-        )
+    if not isinstance(payload.get("triggerTime"), str) or not payload.get("triggerTime"):
+        logger.warning("dropping SSE %r frame: invalid triggerTime", event_type)
         return None
     payload_qid = payload.get("queryId")
     if payload_qid != expected_query_id:
@@ -154,10 +127,7 @@ def _build_event(
             payload_qid, expected_query_id,
         )
         return None
-    if not _is_notify_action(payload.get("action")):
-        logger.warning("dropping SSE %r frame: non-notify action", event_type)
-        return None
-    return {"event_id": event_id, "data": payload}
+    return {"event_id": execution_id, "data": payload}
 
 
 def _is_notify_action(action: object) -> bool:
@@ -249,23 +219,40 @@ class ElfaClient:
         return self._post("/v2/auto/queries", body, op="create_query")
 
     def cancel_query(self, query_id: str) -> dict:
-        """Cancel an active query.
+        """Cancel an active query. Treat already-terminal (409) as success.
 
         Two-step lifecycle: cancel transitions status to 'cancelled' but
         leaves the row queryable. Hard-deletion (DELETE /v2/auto/queries/:id)
         is allowed only after cancel and is intentionally NOT done here so
         the strategy stays auditable.
+
+        Elfa returns 409 if the query is already terminal
+        (`triggered`/`expired`/`cancelled`/`failed`); we coerce that into
+        a no-op success so callers don't have to special-case it.
         """
-        return self._post(
-            f"/v2/auto/queries/{query_id}/cancel", None, op="cancel_query"
+        url = f"{self.base_url}/v2/auto/queries/{query_id}/cancel"
+        resp = requests.post(
+            url,
+            headers={
+                "Content-Type": "application/json",
+                "x-elfa-api-key": self.api_key,
+            },
+            timeout=self.timeout,
         )
+        if resp.status_code == 409:
+            try:
+                body = resp.json()
+            except ValueError:
+                body = {}
+            return {"id": query_id, "status": "already_terminal", "detail": body}
+        return self._handle(resp, op="cancel_query")
 
     def get_query(self, query_id: str) -> dict:
-        """Poll query state. Status reconciliation only.
+        """Poll query state and execution rows.
 
-        `executions[i].id` is `exec_xxx`, a different identifier namespace
-        from SSE `eventId` (`evt_xxx`) per docs.elfa.ai/auto/notifications,
-        so this is NOT used for fire dedupe.
+        `executions[i].id` matches the SSE payload's `executionId` field
+        (same UUID namespace, verified against production 2026-05-13).
+        Safe to use as canonical idempotency key across both channels.
         """
         return self._get(f"/v2/auto/queries/{query_id}", op="get_query")
 
@@ -284,12 +271,12 @@ class ElfaClient:
         or unparsable JSON is logged and dropped. The caller never sees a
         malformed event and so cannot place a GRVT order on garbage.
 
-        Canonical wire format (docs.elfa.ai/auto/notifications):
-            event: query.triggered
-            id: evt_01J...
-            data: {"version":"1.0","eventType":"query.triggered","eventId":"evt_01J...","timestamp":"2026-04-01T12:00:00.000Z","queryId":"q_123","channel":"sse","trigger":{...},"evaluation":{...},"action":{...}}
+        Production wire format (captured 2026-05-13 against api.elfa.ai):
+            event: notification
+            id: <sse-level uuid>
+            data: {"status":"triggered","queryId":"<uuid>","executionId":"<uuid>","triggerTime":"2026-...Z","timestamp":<epoch_ms>,"title":..,"body":..,"message":..,"conditionsMet":<int>, ...}
 
-        Yields {"event_id": "<eventId>", "data": <parsed payload>}.
+        Yields {"event_id": "<executionId>", "data": <parsed payload>}.
 
         Status handling:
  - 200: parse the body as SSE

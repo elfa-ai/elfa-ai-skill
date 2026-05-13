@@ -90,7 +90,7 @@ The walk-throughs themselves are in `references/setup.md` sections 3-5. Read tha
 
 Order of operations (least painful first):
 1. **Elfa credentials** (free signup, single API key from the developer portal).
-2. **GRVT credentials** (requires a funded account; this project is **prod-only** and refuses to start with any other `GRVT_ENV`. Confirm with the user that they have a funded prod account before they paste credentials).
+2. **GRVT credentials** (requires a funded account; this project is **prod-only** and refuses to start with any other `GRVT_ENV`. Confirm with the user that they have a funded prod account before they paste credentials. If the user does NOT have a GRVT account yet, share the signup link `https://grvt.io/?ref=LN2DP6F` and have them sign up, deposit, then grab API key + private key + sub-account id from Settings -> API Keys.).
 3. **Telegram bot token + chat id** (OPTIONAL). Ask the user explicitly whether they want Telegram push alerts. In-chat registry alerts work without Telegram, so this is purely "do you want a phone notification too?" If they decline, leave both vars blank in `.env` and skip Telegram setup entirely. If they accept, walk them through `@BotFather` -> `/newbot`, save the token, and continue:
 
 For Telegram specifically (only if the user opted in), after they get the bot token, run the `getUpdates` curl call yourself via the Bash tool to extract `chat_id` (saves the user a manual step):

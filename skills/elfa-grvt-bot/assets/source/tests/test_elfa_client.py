@@ -245,39 +245,37 @@ async def _collect(aiter):
     return out
 
 
-def _event_json(query_id="q_1", event_id="evt_1", **overrides):
+def _event_json(query_id="q_1", execution_id="exec_1", **overrides):
+    """Production schema captured 2026-05-13 against api.elfa.ai."""
     payload = {
-        "version": "1.0",
-        "eventType": "query.triggered",
-        "eventId": event_id,
-        "timestamp": "2026-04-01T12:00:00.000Z",
+        "status": "triggered",
         "queryId": query_id,
-        "channel": "sse",
-        "trigger": {"symbol": "BTC"},
-        "evaluation": {"triggered": True},
-        "action": {"type": "notify"},
+        "executionId": execution_id,
+        "triggerTime": "2026-05-13T06:53:25.405Z",
+        "timestamp": 1778655205405,
+        "title": "Auto Plan Alert",
+        "body": "test body",
+        "message": "test message",
+        "conditionsMet": 1,
     }
     payload.update(overrides)
     return json.dumps(payload, separators=(",", ":"))
 
 
-async def test_stream_notifications_parses_canonical_query_triggered_frame():
-    """Live SSE wire format per docs.elfa.ai auto/notifications:
+async def test_stream_notifications_parses_production_notification_frame():
+    """Live SSE wire format (captured 2026-05-13 against api.elfa.ai):
 
-        event: query.triggered
-        id: evt_01J...
-        data: {"version":"1.0","eventType":"query.triggered","eventId":"evt_01J...","timestamp":"...","queryId":"q_123","channel":"sse","trigger":{...},"evaluation":{...},"action":{...}}
+        event: notification
+        id: <sse-level uuid>
+        data: {"status":"triggered","queryId":"<uuid>","executionId":"<uuid>","triggerTime":"...","timestamp":..., ...}
 
-    The parser must accept `event: query.triggered` and key the dedupe
-    identifier on `data.eventId`.
+    The parser must accept `event: notification` and key dedupe on
+    `data.executionId` (matches poll-query's executions[i].id).
     """
     lines = [
-        "event: query.triggered",
-        "id: evt_01J_demo",
-        ('data: {"version":"1.0","eventType":"query.triggered",'
-         '"eventId":"evt_01J_demo","timestamp":"2026-04-01T12:00:00.000Z",'
-         '"queryId":"q_1","channel":"sse","trigger":{"symbol":"BTC"},'
-         '"evaluation":{"triggered":true},"action":{"type":"notify"}}'),
+        "event: notification",
+        "id: 1b52d892-ba80-42d8-b421-36586410f23b",
+        f'data: {_event_json("q_1", "exec_demo")}',
         "",
         "event: end",
         "data: {}",
@@ -288,49 +286,18 @@ async def test_stream_notifications_parses_canonical_query_triggered_frame():
         _client().stream_notifications("q_1", http_client=fake)
     )
     assert len(events) == 1
-    assert events[0]["event_id"] == "evt_01J_demo"
-    assert events[0]["data"]["eventId"] == "evt_01J_demo"
+    assert events[0]["event_id"] == "exec_demo"
+    assert events[0]["data"]["executionId"] == "exec_demo"
     assert events[0]["data"]["queryId"] == "q_1"
 
 
-async def test_stream_notifications_requires_payload_event_id_even_with_sse_id():
-    """data.eventId is the canonical dedupe key. The SSE `id:` line is
-    checked for consistency only; it is never a fallback identifier."""
+async def test_stream_notifications_accepts_query_triggered_event_type():
+    """Backward-compat: if Elfa emits the old `event: query.triggered`
+    name, accept it the same way as `notification`."""
     lines = [
         "event: query.triggered",
-        "id: evt_fallback",
-        f'data: {_event_json("q_2", "evt_fallback", eventId=None)}',
-        "",
-    ]
-    fake = _FakeAsyncClient(_FakeStreamResponse(200, lines))
-    events = await _collect(
-        _client().stream_notifications("q_2", http_client=fake)
-    )
-    assert events == []
-
-
-async def test_stream_notifications_drops_sse_id_mismatch():
-    lines = [
-        "event: query.triggered",
-        "id: evt_line",
-        f'data: {_event_json("q_2", "evt_payload")}',
-        "",
-    ]
-    fake = _FakeAsyncClient(_FakeStreamResponse(200, lines))
-    events = await _collect(
-        _client().stream_notifications("q_2", http_client=fake)
-    )
-    assert events == []
-
-
-async def test_stream_notifications_accepts_legacy_notification_event_type():
-    """Defensive backward-compat: if Elfa rolls back to `event: notification`,
-    parse it the same way. Both event types are treated as triggers; the
-    dedupe path is the same."""
-    lines = [
-        "event: notification",
-        "id: evt_legacy",
-        f'data: {_event_json("q_3", "evt_legacy")}',
+        "id: sse_id_1",
+        f'data: {_event_json("q_3", "exec_compat")}',
         "",
     ]
     fake = _FakeAsyncClient(_FakeStreamResponse(200, lines))
@@ -338,7 +305,40 @@ async def test_stream_notifications_accepts_legacy_notification_event_type():
         _client().stream_notifications("q_3", http_client=fake)
     )
     assert len(events) == 1
-    assert events[0]["event_id"] == "evt_legacy"
+    assert events[0]["event_id"] == "exec_compat"
+
+
+async def test_stream_notifications_drops_frame_without_status_triggered():
+    """Only `status: triggered` frames are fires. Anything else (the
+    only documented values are documented values for the action result,
+    but we treat non-`triggered` as a no-op for safety)."""
+    lines = [
+        "event: notification",
+        "id: sse_id",
+        f'data: {_event_json("q_x", "exec_x", status="pending")}',
+        "",
+    ]
+    fake = _FakeAsyncClient(_FakeStreamResponse(200, lines))
+    events = await _collect(
+        _client().stream_notifications("q_x", http_client=fake)
+    )
+    assert events == []
+
+
+async def test_stream_notifications_drops_frame_without_execution_id():
+    """executionId is the canonical dedupe key. Without it, downstream
+    has nothing to key idempotency on, so drop rather than yield."""
+    lines = [
+        "event: notification",
+        "id: sse_id",
+        f'data: {_event_json("q_noid", "")}',
+        "",
+    ]
+    fake = _FakeAsyncClient(_FakeStreamResponse(200, lines))
+    events = await _collect(
+        _client().stream_notifications("q_noid", http_client=fake)
+    )
+    assert events == []
 
 
 async def test_stream_notifications_410_yields_nothing():
@@ -408,28 +408,13 @@ async def test_stream_notifications_drops_frame_with_unparsable_json():
     assert events == []
 
 
-async def test_stream_notifications_drops_frame_without_eventId_or_sse_id():
-    """Without data.eventId we have no canonical dedupe key. Drop rather
-    than yield event_id=None, which would collide on the fires PK."""
-    lines = [
-        "event: query.triggered",
-        f'data: {_event_json("q_noid", "", eventId=None)}',
-        "",
-    ]
-    fake = _FakeAsyncClient(_FakeStreamResponse(200, lines))
-    events = await _collect(
-        _client().stream_notifications("q_noid", http_client=fake)
-    )
-    assert events == []
-
-
 async def test_stream_notifications_drops_frame_when_queryId_mismatches():
     """If a payload claims a queryId different from the one we're streaming
     for, drop it. Defends against any (hypothetical) cross-stream mixup."""
     lines = [
-        "event: query.triggered",
-        "id: evt_wrong_query",
-        f'data: {_event_json("q_OTHER", "evt_wrong_query")}',
+        "event: notification",
+        "id: sse_id",
+        f'data: {_event_json("q_OTHER", "exec_mismatch")}',
         "",
     ]
     fake = _FakeAsyncClient(_FakeStreamResponse(200, lines))
@@ -443,11 +428,11 @@ async def test_stream_notifications_concatenates_multiline_data():
     """SSE spec: multiple `data:` lines in a frame join with `\\n`.
     Without accumulation, multi-line JSON payloads would be silently dropped."""
     lines = [
-        "event: query.triggered",
-        "id: evt_multi",
+        "event: notification",
+        "id: sse_id",
     ]
     lines.extend(f"data: {line}" for line in json.dumps(
-        json.loads(_event_json("q_ml", "evt_multi")), indent=2,
+        json.loads(_event_json("q_ml", "exec_multi")), indent=2,
     ).splitlines())
     lines.append("")
     fake = _FakeAsyncClient(_FakeStreamResponse(200, lines))
@@ -455,7 +440,7 @@ async def test_stream_notifications_concatenates_multiline_data():
         _client().stream_notifications("q_ml", http_client=fake)
     )
     assert len(events) == 1
-    assert events[0]["event_id"] == "evt_multi"
+    assert events[0]["event_id"] == "exec_multi"
     assert events[0]["data"]["queryId"] == "q_ml"
 
 
@@ -465,9 +450,9 @@ async def test_stream_notifications_skips_keep_alive_comment_lines():
     lines = [
         ": ping",
         ": another keep-alive",
-        "event: query.triggered",
-        "id: evt_ka",
-        f'data: {_event_json("q_ka", "evt_ka")}',
+        "event: notification",
+        "id: sse_id",
+        f'data: {_event_json("q_ka", "exec_ka")}',
         "",
         ": ping",
     ]
@@ -476,14 +461,14 @@ async def test_stream_notifications_skips_keep_alive_comment_lines():
         _client().stream_notifications("q_ka", http_client=fake)
     )
     assert len(events) == 1
-    assert events[0]["event_id"] == "evt_ka"
+    assert events[0]["event_id"] == "exec_ka"
 
 
-async def test_stream_notifications_drops_missing_required_payload_fields():
+async def test_stream_notifications_drops_frame_missing_required_fields():
     lines = [
-        "event: query.triggered",
-        "id: evt_missing",
-        'data: {"eventType":"query.triggered","eventId":"evt_missing","queryId":"q_missing"}',
+        "event: notification",
+        "id: sse_id",
+        'data: {"status":"triggered","queryId":"q_missing"}',
         "",
     ]
     fake = _FakeAsyncClient(_FakeStreamResponse(200, lines))
@@ -493,15 +478,34 @@ async def test_stream_notifications_drops_missing_required_payload_fields():
     assert events == []
 
 
-async def test_stream_notifications_drops_non_notify_action():
+async def test_stream_notifications_parses_captured_production_frame():
+    """Replay of the exact bytes captured from api.elfa.ai 2026-05-13.
+    Locks the parser to the real production payload, not a synthesized one."""
+    captured_data = (
+        '{"status":"triggered","title":"Auto Plan Alert",'
+        '"body":"probe fire","message":"probe fire",'
+        '"queryId":"25bd0932-be09-4e80-913f-efcfa1567d22",'
+        '"queryTitle":"SSE capture probe v2",'
+        '"autoDetails":"Debug capture of raw SSE frames; do not register locally.",'
+        '"executionId":"94631fa0-05db-482a-9040-cfbaf13ece71",'
+        '"triggerTime":"2026-05-13T06:53:25.405Z",'
+        '"queryIdShort":"25bd0932","conditionsMet":1,'
+        '"queryDisplayTitle":"SSE capture probe v2 [25bd0932]",'
+        '"timestamp":1778655205405}'
+    )
     lines = [
-        "event: query.triggered",
-        "id: evt_trade",
-        f'data: {_event_json("q_trade", "evt_trade", action={"type": "market_order"})}',
+        "id: 1b52d892-ba80-42d8-b421-36586410f23b",
+        "event: notification",
+        f"data: {captured_data}",
         "",
     ]
     fake = _FakeAsyncClient(_FakeStreamResponse(200, lines))
     events = await _collect(
-        _client().stream_notifications("q_trade", http_client=fake)
+        _client().stream_notifications(
+            "25bd0932-be09-4e80-913f-efcfa1567d22", http_client=fake,
+        )
     )
-    assert events == []
+    assert len(events) == 1
+    assert events[0]["event_id"] == "94631fa0-05db-482a-9040-cfbaf13ece71"
+    assert events[0]["data"]["queryId"] == "25bd0932-be09-4e80-913f-efcfa1567d22"
+    assert events[0]["data"]["conditionsMet"] == 1

@@ -67,6 +67,7 @@ PHASE_NAMES = [
     "install dependencies",
     "run test suite",
     "validate .env",
+    "preflight credentials",
     "start receiver",
 ]
 
@@ -74,7 +75,7 @@ PHASE_NAMES = [
 def announce_plan(skip_tests: bool) -> None:
     print()
     print("=" * 60)
-    print("Setup plan - 6 phases:")
+    print(f"Setup plan - {len(PHASE_NAMES)} phases:")
     for i, name in enumerate(PHASE_NAMES, 1):
         suffix = "  (skipped via --skip-tests)" if skip_tests and "test" in name else ""
         print(f"  {i}. {name}{suffix}")
@@ -229,6 +230,36 @@ def step_check_env(target: Path) -> dict:
     return env
 
 
+def step_preflight(target: Path, venv: Path) -> None:
+    """Probe Elfa, GRVT, and Telegram credentials before starting the
+    receiver. A bad key / geo-block / wrong chat_id surfaces here in
+    ~1 second instead of at first fire (which costs a full strategy
+    cycle to discover). See scripts/preflight.py for probe details."""
+    preflight_script = HERE / "preflight.py"
+    if not preflight_script.exists():
+        log("preflight.py missing from skill bundle; skipping (manual creds at risk)")
+        return
+    python = venv / "bin" / "python"
+    # Inherit .env into preflight via env-file source. We re-export the
+    # parsed .env into os.environ for the child process.
+    env = parse_env_file(target / ".env")
+    child_env = os.environ.copy()
+    for key, value in env.items():
+        child_env[key] = value
+    result = subprocess.run(
+        [str(python), str(preflight_script)],
+        cwd=target,
+        env=child_env,
+        check=False,
+    )
+    if result.returncode != 0:
+        raise SystemExit(
+            "preflight failed: fix the credential / geo issues reported "
+            "above before re-running bootstrap. See "
+            "references/troubleshooting.md for common patterns."
+        )
+
+
 def step_start_receiver(target: Path, venv: Path) -> int:
     pid_file = target / RECEIVER_PID
     existing = read_pid(pid_file)
@@ -321,7 +352,10 @@ def main() -> None:
     phase(5, "validate .env")
     step_check_env(target)
 
-    phase(6, "start receiver")
+    phase(6, "preflight credentials")
+    step_preflight(target, venv)
+
+    phase(7, "start receiver")
     receiver_pid = step_start_receiver(target, venv)
     step_write_teardown(target)
 

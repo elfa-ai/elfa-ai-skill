@@ -68,7 +68,12 @@ def _fail_pair(error: str) -> dict:
 def _fire(*, event_id, query_id, registry, executor, alerts, config,
           raw=None):
     """Convenience: call _process_fire with a synthesized SSE payload."""
-    raw = raw or json.dumps({"queryId": query_id, "eventId": event_id})
+    raw = raw or json.dumps({
+        "status": "triggered",
+        "queryId": query_id,
+        "executionId": event_id,
+        "triggerTime": "2026-05-13T06:53:25.405Z",
+    })
     _process_fire(event_id, query_id, raw, registry, executor, alerts, config)
 
 
@@ -322,39 +327,39 @@ class _FakeElfa:
             yield ev
 
 
-async def test_strategy_loop_processes_canonical_sse_event(tmp_path):
-    """End-to-end: poll-query reports active, SSE yields a canonical
-    query.triggered event keyed on eventId, fire handler places the GRVT
-    order, then poll-query reports terminal so the loop exits cleanly."""
+async def test_strategy_loop_processes_production_sse_event(tmp_path):
+    """End-to-end: poll-query reports active, SSE yields a notification
+    event keyed on executionId, fire handler places the GRVT order, then
+    poll-query reports terminal so the loop exits cleanly."""
     cfg, registry, executor, _, alerts = _setup(tmp_path, strategy=_strategy())
     fake = _FakeElfa(
         query_states={"q_abc": [
             {"queryId": "q_abc", "status": "active",
              "latestEvaluation": None, "executions": []},
             # After SSE closes, poll reports terminal -> loop exits.
+            # executionId in SSE matches executions[i].id in poll-query.
             {"queryId": "q_abc", "status": "triggered",
              "latestEvaluation": None,
-             "executions": [{"id": "exec_internal_1",
+             "executions": [{"id": "exec_live_1",
                              "queryId": "q_abc",
-                             "type": "notify",
+                             "type": "notification",
                              "status": "success",
-                             "createdAt": "2026-05-12T10:41:03Z"}]},
+                             "createdAt": "2026-05-13T06:53:25.405Z"}]},
         ]},
         sse_events_by_query={"q_abc": [
-            {"event_id": "evt_01J_live",
-             "data": {"version": "1.0",
-                      "eventType": "query.triggered",
-                      "eventId": "evt_01J_live",
+            {"event_id": "exec_live_1",
+             "data": {"status": "triggered",
                       "queryId": "q_abc",
-                      "channel": "sse",
-                      "trigger": {"symbol": "BTC"}}},
+                      "executionId": "exec_live_1",
+                      "triggerTime": "2026-05-13T06:53:25.405Z",
+                      "timestamp": 1778655205405}},
         ]},
     )
     await _strategy_loop(
         "q_abc", config=cfg, registry=registry, elfa=fake,
         executor=executor, alerts=alerts,
     )
-    fire = registry.get_fire("evt_01J_live")
+    fire = registry.get_fire("exec_live_1")
     assert fire is not None
     assert fire["outcome"] == "placed"
     executor.place_entry_with_tpsl.assert_called_once()
@@ -383,11 +388,12 @@ async def test_strategy_loop_recurring_remote_status_is_treated_as_terminal(tmp_
 
 async def test_strategy_loop_offline_trigger_emits_manual_intervention(tmp_path):
     """If the strategy fires on Elfa while the receiver was offline,
-    poll-query returns executions[] but their ids are in a different
-    namespace than SSE eventIds. We must NOT replay them through the
-    order-placement path (would double-fire on GRVT or fire stale signals).
-    Instead emit a manual_intervention_required alert so the user reviews
-    the GRVT side themselves."""
+    poll-query returns executions[] but we have no local record of
+    having processed that executionId. We must NOT replay them through
+    the order-placement path (the trigger may be stale by the time we
+    reconnect, and prices have moved). Instead emit a
+    manual_intervention_required alert so the user reviews the GRVT
+    side themselves."""
     cfg, registry, executor, _, alerts = _setup(tmp_path, strategy=_strategy())
     fake = _FakeElfa(
         query_states={"q_abc": [
@@ -598,19 +604,21 @@ async def test_strategy_loop_live_sse_fire_no_extra_terminated_alert(tmp_path):
         query_states={"q_abc": [
             {"queryId": "q_abc", "status": "active",
              "latestEvaluation": None, "executions": []},
-            # After SSE close, poll sees terminal
+            # After SSE close, poll sees terminal. executionId matches the
+            # SSE event_id so dedupe correctly identifies the fire as handled.
             {"queryId": "q_abc", "status": "triggered",
              "latestEvaluation": None,
-             "executions": [{"id": "exec_irrelevant",
+             "executions": [{"id": "exec_live_2",
                              "queryId": "q_abc",
-                             "type": "notify", "status": "success",
-                             "createdAt": "2026-05-12T10:00:00Z"}]},
+                             "type": "notification", "status": "success",
+                             "createdAt": "2026-05-13T06:53:25.405Z"}]},
         ]},
         sse_events_by_query={"q_abc": [
-            {"event_id": "evt_live",
-             "data": {"eventType": "query.triggered",
-                      "eventId": "evt_live",
-                      "queryId": "q_abc"}},
+            {"event_id": "exec_live_2",
+             "data": {"status": "triggered",
+                      "queryId": "q_abc",
+                      "executionId": "exec_live_2",
+                      "triggerTime": "2026-05-13T06:53:25.405Z"}},
         ]},
     )
     await _strategy_loop(

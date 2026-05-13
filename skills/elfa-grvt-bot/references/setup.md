@@ -7,7 +7,7 @@ For when the SKILL.md quick start needs more depth.
 - macOS or Linux. Windows works via WSL.
 - Python 3.11+
 - An Elfa developer account at `https://go.elfa.ai/claude-skills` (free signup).
-- A funded GRVT account at `https://grvt.io`. Even small balances work; the bot will respect `max_notional_usd` per strategy.
+- A funded GRVT account. Even small balances work; the bot will respect `max_notional_usd` per strategy. **New to GRVT? Sign up at `https://grvt.io/?ref=LN2DP6F`**, then deposit before continuing.
 - A Telegram account (OPTIONAL -- only needed if you want real-time push alerts on top of the in-chat channel).
 
 ## Step-by-step
@@ -47,12 +47,13 @@ You only need `ELFA_API_KEY`. Per `docs.elfa.ai/api/rest/auto-create-query-v-2`,
 
 ### 4. Get GRVT credentials
 
-1. At `https://grvt.io`, navigate to Settings, then API Keys.
-2. Create a new API key. You will see three values:
+1. **First time at GRVT?** Sign up at `https://grvt.io/?ref=LN2DP6F`, deposit, then continue. Otherwise sign in at `https://grvt.io`.
+2. Navigate to Settings, then API Keys.
+3. Create a new API key. You will see three values:
  - The API key string itself
  - An EVM private key paired with this API key (used for EIP-712 order signing)
  - A trading account ID (the sub-account this key is scoped to)
-3. Copy all three.
+4. Copy all three.
 
 You need:
 - `GRVT_API_KEY`
