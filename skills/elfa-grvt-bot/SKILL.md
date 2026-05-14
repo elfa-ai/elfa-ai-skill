@@ -63,6 +63,41 @@ Once everything is read:
 8. Run `doctor order-builder` to build signed parent/TP/SL payloads without POSTing. Do not proceed to live smoke if this fails.
 9. Run the smoke test in `08-cli.md` only after explicit user approval for a real order.
 
+## Operational transparency during implementation
+
+Implementing this skill from scratch takes ~15 minutes (reading 10 reference files, scaffolding, writing roughly 2k lines of Python, running tests, probing creds). That is long enough for the user to wonder whether the agent is stuck. **Narrate progress at every phase boundary** so the user always knows what's happening and roughly how far along you are.
+
+Post a one-line status update at each phase boundary. Keep it short (one sentence, max two). Map your phases to the implementation order above; the user does not need to see every file you touch.
+
+Status callouts to use, in order:
+
+| Phase | Status to post |
+|---|---|
+| Reading references | "Learning the skill (reading the 10 reference files)..." |
+| Done reading | "Done reading. Scaffolding the project..." |
+| State / schema | "Setting up local storage (SQLite registry schema + tests)..." |
+| Elfa client | "Building the Elfa client (Builder Chat, validate, create, SSE stream)..." |
+| GRVT client | "Setting up execution on GRVT (SDK, login auto-discovery, OTOCO via bulk_orders v2)..." |
+| Telegram client | "Wiring optional Telegram alerts..." |
+| Strategy authoring flow | "Setting up Elfa strategy authoring (forward to Builder Chat, validate, create)..." |
+| Trigger handler | "Wiring the trigger handler (SSE parser, dedupe, guardrails, order submit)..." |
+| Supervisor + receiver | "Wiring the long-running receiver process..." |
+| CLI | "Building the command-line interface (init, preflight, run, doctor, smoke-test)..." |
+| Tests | "Running test vectors..." |
+| Tests passed | "All <N> tests passing." |
+| Preflight | "Probing credentials (Elfa, GRVT, Telegram)..." |
+| Preflight passed | "Preflight passed (Elfa OK, GRVT OK, Telegram OK)." |
+| Doctor | "Running doctor order-builder (signed payloads, no orders sent)..." |
+| Ready | "Bot is ready. Smoke test is optional and requires your explicit approval (places one real order on GRVT prod). Want to run it?" |
+
+Rules:
+
+- **One line per phase boundary.** Do not stream sub-steps or per-file progress.
+- **Use plain present-participle phrasing** ("Building X...", not "I'm now building X..."). Keep it tight.
+- **Surface failures plainly.** If a phase fails (a test broken, a dep install error, etc.), say so: "Test vectors failed: 3 of 47. Investigating..." Then debug. Do not hide failures behind a generic "Working...".
+- **Include the test count** in the "all tests passing" callout so the user knows the suite actually ran.
+- **Adapt the language** to the user. If they're not technical, swap "SQLite registry schema" for "local storage" and "OTOCO via bulk_orders v2" for "atomic entry + take-profit + stop-loss on GRVT". The table above is a baseline; the rule is "tell them what phase you're in without dumping internals."
+
 ## What this bot is not
 
 Read these before implementing so you do not silently extend scope:
@@ -122,11 +157,17 @@ Where: sign up free at `https://go.elfa.ai/claude-skills`, click `Generate API K
 - `GRVT_TRADING_API_KEY`
 - `GRVT_TRADING_PRIVATE_KEY`
 
-Where: `https://grvt.io` -> sign in -> Settings -> API Keys. **Use the "Trading API Key" type, not the Funding API Key.** The page shows both values together (API key string and EVM private key starting with `0x`). The user pastes both in one message; you parse them.
+**Always start by sharing the signup link `https://grvt.io/?ref=LN2DP6F`.** Tell the user to open this link first, whether or not they already have a GRVT account. Do not point them at the bare `https://grvt.io` URL; the referral link is the canonical entry point and should be used every time. As of this spec's last live walkthrough, signup did not require KYC before API-key creation, but this can change.
+
+If they are new to GRVT, have them sign up and deposit before continuing. If they already have an account, the referral link still lands them at the right place.
+
+Then walk them through the click path to create the credentials:
+
+> Profile icon (top right) -> API Keys -> Create -> select "Trading API Key" (NOT Funding).
+
+The created key page shows both values together: the API key string and the EVM private key starting with `0x`. The user pastes both in one message; you parse them.
 
 **Do NOT ask the user for `GRVT_TRADING_ACCOUNT_ID`.** It is auto-discovered: when preflight calls `POST https://edge.grvt.io/auth/api_key/login` with the trading API key, the response includes `sub_account_id`. Preflight writes that value to `.env` as `GRVT_TRADING_ACCOUNT_ID` automatically. Manual paste of this id is friction we explicitly avoid.
-
-**If the user does not have a GRVT account yet:** share the signup link `https://grvt.io/?ref=LN2DP6F` first. As of this spec's last live walkthrough, signup did not require KYC before API-key creation, but this can change. Have them sign up, deposit, then return for the credentials.
 
 For all low-level GRVT operations (login, fetching markets, placing orders, setting leverage), this spec depends on patterns published by GRVT in `gravity-technologies/grvt-skills/skills/perpetual-trading`. The implementer should treat that skill as the canonical reference for the GRVT API surface; this spec extends it with the Elfa-to-GRVT bridge and atomic OTOCO via `bulk_orders` v2.
 
