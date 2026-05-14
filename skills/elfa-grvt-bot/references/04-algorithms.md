@@ -136,15 +136,19 @@ async def strategy_loop(query_id, registry, elfa, executor, alerts, config):
 Notes:
 
 - `TERMINAL_STATUSES = {'triggered', 'expired', 'cancelled', 'failed'}`.
-- `process_fire` is at-most-once via the dedupe insert in `03-state.md`. If the SSE redelivers the same `executionId`, the second call is a no-op.
+- `process_fire` is at-most-once via the dedupe insert in `03-state.md`. If the SSE redelivers the same event (same dedupe key regardless of which schema variant the frame used), the second call is a no-op.
 - After a successful fire, we return immediately rather than looping; the supervisor's next reconcile will see local status `fired` and reap the task.
 - The poll-query check on iteration 1 of the loop catches the "fired while offline" case before opening any stream.
 
 ## SSE frame parser
 
-This is the most-tested part of the system. Lock it to the captured frames.
+This is the most-tested part of the system. Production has shipped multiple wire-format schemas under the same endpoint; the parser must accept all of them (see `02-protocols.md` "Wire-format drift").
 
 ```
+TRIGGER_EVENT_TYPES = ('notification', 'notification:new', 'query.triggered')
+SILENT_SKIP_EVENT_TYPES = ('end', 'heartbeat', 'ping')  # known non-triggers; no warn, no drift counter
+
+
 async def parse_sse_frames(lines, expected_query_id):
     """Yields well-formed trigger events. Drops malformed frames with WARN."""
     current_event = None
@@ -176,9 +180,16 @@ async def parse_sse_frames(lines, expected_query_id):
 
 
 def build_event(event_type, sse_id, data, expected_query_id):
-    """Returns {event_id, data} or None. None = drop."""
-    if event_type not in ('notification', 'query.triggered'):
-        return None
+    """Returns {event_id, data} or None. None = drop.
+
+    Dispatches on event_type. Each branch yields the same shape
+    ({event_id: <string>, data: <full payload>}) even though the
+    underlying schemas differ.
+    """
+    if event_type in SILENT_SKIP_EVENT_TYPES:
+        return None  # known non-trigger (close frame, heartbeat); no warn
+    if event_type not in TRIGGER_EVENT_TYPES:
+        return None  # unknown event type; no warn (could be a new control event)
     if not data:
         warn(f"dropping SSE {event_type!r} frame: missing data")
         return None
@@ -190,30 +201,58 @@ def build_event(event_type, sse_id, data, expected_query_id):
     if not isinstance(payload, dict):
         warn(f"dropping SSE {event_type!r} frame: data is not a JSON object")
         return None
-    for required in ('queryId', 'executionId', 'triggerTime', 'status'):
-        if required not in payload:
-            warn(f"dropping SSE {event_type!r} frame: missing fields ...")
+
+    # Branch 1: production schema ('notification' + status=triggered).
+    # Verified emitted by api.elfa.ai as of 2026-05-14. Lead with this
+    # branch because it is what's actually being delivered today.
+    if event_type == 'notification' and payload.get('status') == 'triggered':
+        for required in ('queryId', 'executionId', 'triggerTime'):
+            if not isinstance(payload.get(required), str) or not payload.get(required):
+                warn(f"dropping SSE {event_type!r}: missing/invalid {required}")
+                return None
+        if payload['queryId'] != expected_query_id:
+            warn(f"dropping SSE {event_type!r}: queryId mismatch")
             return None
-    if payload.get('status') != 'triggered':
-        warn(f"dropping: status != 'triggered'")
-        return None
-    if not isinstance(payload.get('executionId'), str) or not payload['executionId']:
-        warn("dropping: invalid executionId")
-        return None
-    if not isinstance(payload.get('triggerTime'), str) or not payload['triggerTime']:
-        warn("dropping: invalid triggerTime")
-        return None
-    if payload.get('queryId') != expected_query_id:
-        warn(f"dropping: queryId {payload.get('queryId')!r} != stream queryId {expected_query_id!r}")
-        return None
-    return {'event_id': payload['executionId'], 'data': payload}
+        return {'event_id': payload['executionId'], 'data': payload}
+
+    # Branch 2: documented schema ('notification:new') - accepted for the
+    # day Elfa rolls it out; not observed in production as of 2026-05-14.
+    if event_type == 'notification:new':
+        nid = payload.get('id')
+        nested = payload.get('data') or {}
+        qid = nested.get('queryId')
+        if nid is None:
+            warn(f"dropping SSE {event_type!r}: missing top-level 'id'")
+            return None
+        if qid != expected_query_id:
+            warn(f"dropping SSE {event_type!r}: data.queryId {qid!r} != stream {expected_query_id!r}")
+            return None
+        return {'event_id': str(nid), 'data': payload}
+
+    # Branch 3: older canonical envelope ('query.triggered' with eventId)
+    if event_type == 'query.triggered':
+        ev_id = payload.get('eventId')
+        qid = payload.get('queryId')
+        if not isinstance(ev_id, str) or not ev_id:
+            warn(f"dropping SSE {event_type!r}: missing/invalid eventId")
+            return None
+        if qid != expected_query_id:
+            warn(f"dropping SSE {event_type!r}: queryId mismatch")
+            return None
+        return {'event_id': ev_id, 'data': payload}
+
+    # Event type accepted but payload doesn't match any known schema
+    warn(f"dropping SSE {event_type!r}: payload matches no known schema (parser drift?)")
+    return None
 ```
 
 Notes:
 
-- The SSE `id:` line value (`current_id`) is parsed but discarded by `build_event`. It is not the dedupe key; `executionId` is.
+- The SSE `id:` line value (`sse_id`) is parsed but discarded. The dedupe key always comes from a field inside the JSON payload, never the SSE-level id, because the SSE id is not always meaningful (e.g., production has used both UUIDs and numbers).
 - All "drop" paths are WARN-level logs. They are NOT alerts. A burst of drops should be loud in logs but quiet in the user-facing alerts table.
-- An exception: if the parser keeps dropping frames for the same active strategy (e.g., 3 dropped frames in a 10-minute window), emit a `parser_drift` ERROR alert so the user knows something has changed on Elfa's side. Implementation: keep a per-query drop counter in memory; reset it when a frame parses successfully or the task is cancelled.
+- **Exception**: if the parser keeps dropping frames for the same active strategy (3+ drops in a 10-minute window), emit a `parser_drift` ERROR alert. Keep a per-query drop counter in memory; reset on first successful parse or task cancellation.
+- The dedupe key produced is a string regardless of source schema (`str(payload["id"])` for the docs schema; UUIDs for the others). The `fires.event_id` TEXT column accepts all of them.
+- `event: end` close frames from Elfa (with payload `{"code": "QUERY_STREAM_CLOSED", ...}`) are explicitly in `SILENT_SKIP_EVENT_TYPES`. The strategy-loop catches the subsequent connection close and falls back to poll-query for reconciliation.
 
 ## Fire processing
 

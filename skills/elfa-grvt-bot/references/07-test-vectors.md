@@ -36,13 +36,57 @@ EXPECT
     data["queryId"] == "359cd110-9cb6-4be6-ac16-99401d13d998"
 ```
 
-### Vector P3: legacy event:query.triggered name still parses
+### Vector P3a: current documented schema (event: notification:new)
+
+```
+INPUT
+  id: 12345
+  event: notification:new
+  data: {"id":12345,"type":"athena_query_notify_only","category":"alerts","title":"Query triggered: BTC > 100000","body":"BTC price crossed above 100000","data":{"queryId":"q1"},"priority":"high","createdAt":"2026-04-01T12:00:00.000Z"}
+  <blank>
+
+EXPECT
+  parse_sse_frames("q1") yields 1 event:
+    event_id == "12345"           # numeric id from payload, cast to string
+    data["id"] == 12345
+    data["data"]["queryId"] == "q1"
+```
+
+### Vector P3b: docs schema with queryId mismatch drops
+
+```
+INPUT
+  id: 12346
+  event: notification:new
+  data: {"id":12346,"type":"...","category":"alerts","title":"...","body":"...","data":{"queryId":"q_OTHER"},"priority":"high","createdAt":"..."}
+  <blank>
+
+EXPECT
+  parse_sse_frames("q_REQUESTED") yields []
+  log captures WARN containing "data.queryId"
+```
+
+### Vector P3c: docs schema with missing top-level id drops
+
+```
+INPUT
+  id: 12347
+  event: notification:new
+  data: {"type":"...","category":"alerts","title":"...","body":"...","data":{"queryId":"q1"},"priority":"high","createdAt":"..."}
+  <blank>
+
+EXPECT
+  parse_sse_frames("q1") yields []
+  log captures WARN containing "missing top-level 'id'"
+```
+
+### Vector P3d: legacy event:query.triggered with eventId still parses
 
 ```
 INPUT
   event: query.triggered
   id: sse_id
-  data: {"status":"triggered","queryId":"q1","executionId":"e1","triggerTime":"2026-05-13T00:00:00Z"}
+  data: {"eventId":"e1","queryId":"q1","eventType":"query.triggered","channel":"sse"}
   <blank>
 
 EXPECT
@@ -135,6 +179,20 @@ INPUT
 EXPECT
   parse_sse_frames("q1") yields []
   log captures WARN containing "JSON"
+```
+
+### Vector P9b: stream-close event:end is silently skipped (no WARN, no drift counter)
+
+```
+INPUT
+  event: end
+  data: {"code":"QUERY_STREAM_CLOSED","status":"triggered","queryId":"q1"}
+  <blank>
+
+EXPECT
+  parse_sse_frames("q1") yields []
+  log does NOT capture a WARN (this is a known non-trigger event)
+  per-query drift counter is NOT incremented
 ```
 
 ### Vector P10: unknown event type silently skipped
@@ -369,7 +427,7 @@ ACT
 EXPECT
   strategies.status for q1 == 'fired'
   fires has 1 row with outcome='placed' for q1
-  alerts has 2 rows for q1: trigger_received, order_placed (mock executor returns only after confirmed accepted/filled)
+  alerts has 2 rows for q1: trigger_received, order_placed
 ```
 
 ### Vector S2: active -> fired on guardrail reject

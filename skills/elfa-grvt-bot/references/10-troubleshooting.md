@@ -18,7 +18,7 @@ GRVT does NOT require KYC for signup. There is no identity verification, no docu
 
 - **Cause:** Some part of the EQL is malformed.
 - **Fix:** Read the `errors[]` array verbatim. Common errors:
-  - Period below the documented minimum (`cron` and `llm` are documented as 1h minimum, but `5m` is empirically accepted for cron and llm)
+  - Period below the documented minimum (`cron.*` and `llm.athena_condition` both require `period >= 1h` per `docs.elfa.ai/auto/triggers` and `auto/agent-quickstart`)
   - Missing `period` on a TA method that requires it (`ema`, `sma`)
   - `period` passed as string `"14"` instead of number `14`
 - **Recovery:** Re-prompt Builder Chat with a clearer description, or ask the user to rephrase. Do NOT hand-edit the EQL JSON.
@@ -92,7 +92,7 @@ GRVT does NOT require KYC for signup. There is no identity verification, no docu
 
 ### Symptom: SSE stream opens but no fire arrives after the trigger condition is true
 
-- **Cause:** Elfa's condition evaluator runs on its own schedule. For cron, the documented minimum is 1h (5m empirically works). For TA conditions, evaluation cadence depends on the timeframe. The trigger may not actually have happened yet.
+- **Cause:** Elfa's condition evaluator runs on its own schedule. For cron and `llm.athena_condition`, the documented minimum `period` is `1h`. For TA conditions, evaluation cadence depends on the `timeframe`. The trigger may not actually have happened yet.
 - **Diagnostic:** Poll `GET /v2/auto/queries/<id>` and read `latestEvaluation.wouldTriggerNow`. If `false`, Elfa doesn't think the condition has met yet.
 - **Fix:** Confirm your data assumption (e.g., is the price actually below the threshold right now?). For TA, confirm the timeframe and period are what you expect.
 
